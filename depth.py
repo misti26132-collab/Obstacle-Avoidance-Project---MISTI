@@ -7,7 +7,7 @@ Cap = cv2.VideoCapture(0)
 results = model.predict(source=0, show=True, conf=0.5)
 
 class DepthEstimator:
-    def __init__(self, model_path='yolov8s.pt', device='cpu'):
+    def __init__(self, model_path='yolov8n.pt', device='gpu'):
         # Load YOLOv8 model
         self.model = YOLO(model_path)
         self.device = device

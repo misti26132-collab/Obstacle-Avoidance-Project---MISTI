@@ -29,7 +29,7 @@ def request_speech(text):
 # 2. Setup YOLO and Camera
 model = YOLO('yolov8n.pt')
 url = "camera ip here"  # Replace with your IP camera URL
-cap = cv2.VideoCapture(url)
+cap = cv2.VideoCapture(0) # Use 0 for default webcam or replace with url
 
 # Variables to slow down the logic triggers
 detection_frames = 0
