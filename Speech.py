@@ -9,42 +9,42 @@ from ultralytics import YOLO
 speech_queue = queue.Queue()
 
 def speech_worker():
-    engine = pyttsx3.init()
-    engine.setProperty('rate', 175) # Speech rate
     while True:
+        text = speech_queue.get()
+        if text is None: 
+            break
         try:
-            text = speech_queue.get()
-            if text is None: 
-                break
+            print(f"Executing Speech: {text}")
+            engine = pyttsx3.init()
             
-            print(f"Speaking: {text}") # Debug print to see it working
+            engine.setProperty('rate', 180)
+            
             engine.say(text)
             engine.runAndWait()
             
-            speech_queue.task_done()
+            engine.stop()
+            del engine 
+            
         except Exception as e:
-            print(f"Speech Error: {e}")
-            engine = pyttsx3.init()
+            print(f"Speech Thread Error: {e}")
+        
+        finally:
+            speech_queue.task_done()
 
-# Start the speech thread
 worker_thread = threading.Thread(target=speech_worker, daemon=True)
 worker_thread.start()
 
 def request_speech(text):
-    speech_queue.put(text)
+    if speech_queue.qsize() < 2:
+        speech_queue.put(text)
 
-# 2. Setup YOLO and Video Capture
+# Initialize YOLO and Video
 model = YOLO('yolov8n.pt')
-<<<<<<< HEAD
-url = "camera ip here"  # Replace with your IP camera URL
-cap = cv2.VideoCapture(0) # Use 0 for default webcam or replace with url
-=======
-url = "camera ip here" # url = 0  # Use 0 for local webcam or your IP URL to use with an external webcam
-cap = cv2.VideoCapture(0) # use 0 or url
->>>>>>> 968f5fa700e6668125121ebdb33078bc941a5c08
+url = "camera ip here" # Replace with your IP camera
+cap = cv2.VideoCapture(url) # URL or 0 for webcam
 
 detection_frames = 0
-COOLDOWN_TIME = 3 
+COOLDOWN_TIME = 3.0  # Seconds between speech triggers
 last_command_time = 0
 
 while cap.isOpened():
@@ -58,7 +58,6 @@ while cap.isOpened():
     if len(boxes) > 0:
         detection_frames += 1
         
-        # Logic trigger: 5 frames of detection AND cooldown has passed
         if detection_frames >= 5 and (current_time - last_command_time > COOLDOWN_TIME):
             x_center = boxes[0].xywh[0][0].item()
             width = frame.shape[1]
@@ -72,16 +71,16 @@ while cap.isOpened():
 
             request_speech(msg)
             last_command_time = current_time
-            detection_frames = 0
-    else: 
-        detection_frames = max(0, detection_frames - 1)
+            detection_frames = 0 
+    else:
+        detection_frames = 0
 
-    # Display results
     annotated_frame = results[0].plot()
-    cv2.imshow("TTS", annotated_frame)
+    cv2.imshow("YOLO Navigation", annotated_frame)
+
     if cv2.waitKey(1) & 0xFF == ord("q"):
         break
 
-speech_queue.put(None) 
+speech_queue.put(None)
 cap.release()
 cv2.destroyAllWindows()
