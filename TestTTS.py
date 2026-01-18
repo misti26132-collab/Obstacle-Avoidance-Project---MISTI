@@ -6,19 +6,17 @@ import time
 from ultralytics import YOLO
 
 # ==============================
-# TEXT TO SPEECH (ROBUST)
+# TEXT TO SPEECH (WINDOWS-SAFE)
 # ==============================
 
 speech_queue = queue.Queue()
 
 def speech_worker():
     """
-    Dedicated TTS thread.
-    Reinitializes engine safely if anything goes wrong.
+    WINDOWS-SAFE TTS WORKER
+    Creates a NEW pyttsx3 engine for each message.
+    This avoids the silent freeze bug.
     """
-    engine = pyttsx3.init()
-    engine.setProperty('rate', 175)
-
     while True:
         text = speech_queue.get()
 
@@ -27,19 +25,23 @@ def speech_worker():
 
         try:
             print(f"[TTS] {text}")
-            engine.say(text)
-            engine.runAndWait()
-        except Exception as e:
-            print("[TTS ERROR]", e)
-            engine.stop()
+
             engine = pyttsx3.init()
             engine.setProperty('rate', 175)
+            engine.say(text)
+            engine.runAndWait()
+            engine.stop()
 
-        time.sleep(0.1)  # small delay prevents engine lockups
+            del engine  # force cleanup
+
+        except Exception as e:
+            print("[TTS ERROR]", e)
+
+        speech_queue.task_done()
 
 
 def request_speech(text):
-    # Clear old messages to prevent backlog
+    # Prevent speech backlog
     while not speech_queue.empty():
         try:
             speech_queue.get_nowait()
@@ -73,9 +75,9 @@ if not cap.isOpened():
 # LOGIC PARAMETERS
 # ==============================
 
-COOLDOWN_TIME = 1.0          # seconds between speech
+COOLDOWN_TIME = 3.0
 last_spoken_time = 0
-last_direction = None       # prevents repeating same command rapidly
+last_direction = None
 
 print("System running. Press Q to quit.")
 
@@ -93,7 +95,6 @@ while True:
     current_time = time.time()
 
     if boxes is not None and len(boxes) > 0:
-        # Use the most confident detection
         x_center = boxes.xywh[0][0].item()
         frame_width = frame.shape[1]
 
@@ -117,7 +118,7 @@ while True:
             last_direction = direction
 
     else:
-        last_direction = None  # reset when no obstacle
+        last_direction = None
 
     annotated_frame = results[0].plot()
     cv2.imshow("Obstacle Detection + TTS", annotated_frame)
