@@ -4,9 +4,6 @@ import numpy as np
 
 class DepthEstimator:
     def __init__(self, device=None):
-        """
-        Initialize MiDaS depth estimator
-        """
         if device is None:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
@@ -22,16 +19,11 @@ class DepthEstimator:
             transforms = torch.hub.load("intel-isl/MiDaS", "transforms", trust_repo=True)
             self.transform = transforms.small_transform
             
-            print("MiDaS model loaded successfully")
+            print(" MiDaS model loaded successfully")
         except Exception as e:
             raise RuntimeError(f"Failed to load MiDaS model: {e}")
 
-    def estimate(self, frame):
-        """
-        Takes a BGR frame (OpenCV) and returns:
-        - normalized depth map (numpy array)
-        """
-
+    def estimate_depth(self, frame):
         # Convert BGR → RGB
         img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         input_batch = self.transform(img).to(self.device)
@@ -46,44 +38,65 @@ class DepthEstimator:
             ).squeeze()
 
         depth_map_raw = prediction.cpu().numpy()
+    
+        # Normalize to 0-1 range
+        depth_min = depth_map_raw.min()
+        depth_max = depth_map_raw.max()
+        
+        if depth_max - depth_min > 0:
+            depth_normalized = (depth_map_raw - depth_min) / (depth_max - depth_min)
+        else:
+            depth_normalized = np.zeros_like(depth_map_raw)
+        
+        # depth_normalized: 0 = far, 1 = close 
+        return depth_normalized, depth_map_raw
 
-        # ==========================================================
-        # FIXED SCALING (FLIPPED)
-        # ==========================================================
-        DISPARITY_SCALE = 800.0
-        
-        # Normalize raw disparity
-        depth_map = depth_map_raw / DISPARITY_SCALE
-        
-        # Clip to [0, 1]
-        depth_map = np.clip(depth_map, 0, 1)
-        
-        # PREVIOUSLY: depth_map = 1.0 - depth_map
-        # NOW: We keep it as is.
-        # RESULT: 
-        #   High Raw Disparity (Close) -> High Output (1.0)
-        #   Low Raw Disparity (Far)    -> Low Output (0.0)
-
-        return depth_map
+    def estimate(self, frame):
+        depth_normalized, _ = self.estimate_depth(frame)
+        return depth_normalized
 
     def estimate_with_visualization(self, frame):
-        """
-        Estimate depth and return both depth map and visualization
-        """
-        depth_map = self.estimate(frame)
+        depth_map, _ = self.estimate_depth(frame)
         
-        # For Visualization:
-        # We still want CLOSE objects to look BRIGHT/YELLOW.
-        # Since Close is now ~1.0:
-        # We just multiply by 255 (No inversion needed here either)
+        # Convert to 0-255 range for visualization
+        depth_vis = (depth_map * 255).astype(np.uint8)
         
-        vis_raw = depth_map * 255
-        depth_vis = vis_raw.astype(np.uint8)
-        
-        # MAGMA: 0=Black (Far), 255=Yellow (Close)
-        depth_colored = cv2.applyColorMap(depth_vis, cv2.COLORMAP_MAGMA)
+        depth_colored = cv2.applyColorMap(depth_vis, cv2.COLORMAP_JET)
         
         return depth_map, depth_colored
+    
+    def get_object_depth(self, depth_map, x1, y1, x2, y2):
+    
+        h, w = depth_map.shape
+        
+        # Ensure bounds
+        x1 = max(0, min(x1, w - 1))
+        x2 = max(0, min(x2, w))
+        y1 = max(0, min(y1, h - 1))
+        y2 = max(0, min(y2, h))
+        
+        # Extract region
+        roi = depth_map[y1:y2, x1:x2]
+        
+        if roi.size == 0:
+            return 0.0, "unknown"
+        
+        # Get maximum depth in ROI (closest point)
+        max_depth = np.max(roi)
+        mean_depth = np.mean(roi)
+        
+        # Use max_depth for proximity (most conservative)
+        # Higher value = closer
+        if max_depth > 0.75:  # Top 25% = very close
+            depth_category = "very_close"
+        elif max_depth > 0.55:  # Top 45% = close
+            depth_category = "close"
+        elif max_depth > 0.35:  # Top 65% = medium
+            depth_category = "medium"
+        else:
+            depth_category = "far"
+        
+        return max_depth, depth_category
     
     def get_distance_at_point(self, depth_map, x, y, radius=5):
         h, w = depth_map.shape
@@ -94,3 +107,9 @@ class DepthEstimator:
         
         region = depth_map[y1:y2, x1:x2]
         return region.mean() if region.size > 0 else 0.5
+    
+    def visualize_depth(self, depth_map_normalized):
+
+        depth_vis = (depth_map_normalized * 255).astype(np.uint8)
+        colored_depth = cv2.applyColorMap(depth_vis, cv2.COLORMAP_JET)
+        return colored_depth
