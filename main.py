@@ -58,6 +58,8 @@ def main():
 
     cap.release()
     cv2.destroyAllWindows()
+    speaker.stop()
+    print("System stopped")
     print("System stopped")
 
 if __name__ == "__main__":

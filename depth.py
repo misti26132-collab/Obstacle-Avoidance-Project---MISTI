@@ -2,9 +2,10 @@ import torch
 import cv2
 import numpy as np
 from collections import deque
+import time
 
 class DepthEstimator:
-    def __init__(self, device=None):
+    def __init__(self, device=None, max_retries=3):
         """
         Initialize MiDaS depth estimator with adaptive scaling
         """
@@ -15,17 +16,36 @@ class DepthEstimator:
         
         print(f"DepthEstimator using device: {self.device}")
 
-        try:
-            self.midas = torch.hub.load("intel-isl/MiDaS", "MiDaS_small", trust_repo=True)
-            self.midas.to(self.device)
-            self.midas.eval()
-            
-            transforms = torch.hub.load("intel-isl/MiDaS", "transforms", trust_repo=True)
-            self.transform = transforms.small_transform
-            
-            print(" MiDaS model loaded successfully")
-        except Exception as e:
-            raise RuntimeError(f"Failed to load MiDaS model: {e}")
+        # Try to load with retries for network issues
+        self.midas = None
+        self.transform = None
+        
+        for attempt in range(max_retries):
+            try:
+                print(f"Loading MiDaS model (attempt {attempt + 1}/{max_retries})...")
+                self.midas = torch.hub.load("intel-isl/MiDaS", "MiDaS_small", trust_repo=True)
+                self.midas.to(self.device)
+                self.midas.eval()
+                
+                print("Loading transforms...")
+                transforms = torch.hub.load("intel-isl/MiDaS", "transforms", trust_repo=True)
+                self.transform = transforms.small_transform
+                
+                print("✓ MiDaS model loaded successfully")
+                break
+                
+            except Exception as e:
+                print(f"✗ Attempt {attempt + 1} failed: {type(e).__name__}")
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                    print(f"  Retrying in {wait_time} seconds...")
+                    time.sleep(wait_time)
+                else:
+                    raise RuntimeError(
+                        f"Failed to load MiDaS model after {max_retries} attempts.\n"
+                        f"Last error: {e}\n"
+                        f"This is usually a network issue. Check your internet connection and try again."
+                    )
         
         # Adaptive scaling components
         self.scale_history = deque(maxlen=30)  # Track last 30 frames
