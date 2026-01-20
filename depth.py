@@ -58,8 +58,8 @@ class DepthEstimator:
         
         Returns:
             depth_map: Normalized depth map where:
-                      - Lower values (closer to 0) = CLOSER objects
-                      - Higher values (closer to 1) = FARTHER objects
+                      - Higher values (closer to 1) = CLOSER objects
+                      - Lower values (closer to 0) = FARTHER objects
         """
         if frame is None or frame.size == 0:
             raise ValueError("Invalid frame provided to depth estimator")
@@ -108,7 +108,8 @@ class DepthEstimator:
             depth_map = (depth_map_raw - smooth_min) / depth_range
             depth_map = np.clip(depth_map, 0, 1)
         
-        # Invert: High raw disparity (close) -> Low output (0.0)
+        # Invert: High raw disparity (close) -> High output (1.0)
+        # So that: 1.0 = CLOSE, 0.0 = FAR
         depth_map = 1.0 - depth_map
 
         return depth_map
@@ -117,7 +118,7 @@ class DepthEstimator:
         depth_map = self.estimate(frame)
         
         # Visualization: Close=Bright, Far=Dark
-        vis_raw = (1.0 - depth_map) * 255
+        vis_raw = depth_map * 255  # High values (close) = bright
         depth_vis = vis_raw.astype(np.uint8)
         
         # Apply MAGMA colormap
@@ -125,41 +126,13 @@ class DepthEstimator:
         
         return depth_map, depth_colored
     
-    def get_object_depth(self, depth_map, x1, y1, x2, y2):
-    
-        h, w = depth_map.shape
-        
-        # Ensure bounds
-        x1 = max(0, min(x1, w - 1))
-        x2 = max(0, min(x2, w))
-        y1 = max(0, min(y1, h - 1))
-        y2 = max(0, min(y2, h))
-        
-        # Extract region
-        roi = depth_map[y1:y2, x1:x2]
-        
-        if roi.size == 0:
-            return 0.0, "unknown"
-        
-        # Get maximum depth in ROI (closest point)
-        max_depth = np.max(roi)
-        mean_depth = np.mean(roi)
-        
-        # Use max_depth for proximity (most conservative)
-        # Higher value = closer
-        if max_depth > 0.75:  # Top 25% = very close
-            depth_category = "very_close"
-        elif max_depth > 0.55:  # Top 45% = close
-            depth_category = "close"
-        elif max_depth > 0.35:  # Top 65% = medium
-            depth_category = "medium"
-        else:
-            depth_category = "far"
-        
-        return max_depth, depth_category
-    
     def get_distance_at_point(self, depth_map, x, y, radius=5):
-        """Get average depth around a point"""
+        """
+        Get average depth around a point
+        
+        Returns:
+            Average depth value (1.0 = close, 0.0 = far)
+        """
         h, w = depth_map.shape
         x1 = max(0, int(x - radius))
         y1 = max(0, int(y - radius))
@@ -170,7 +143,9 @@ class DepthEstimator:
         return region.mean() if region.size > 0 else 0.5
     
     def visualize_depth(self, depth_map_normalized):
-
+        """
+        Visualize depth map with colormap
+        """
         depth_vis = (depth_map_normalized * 255).astype(np.uint8)
         colored_depth = cv2.applyColorMap(depth_vis, cv2.COLORMAP_JET)
         return colored_depth
