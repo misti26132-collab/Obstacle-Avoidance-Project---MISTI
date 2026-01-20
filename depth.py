@@ -94,7 +94,7 @@ class DepthEstimator:
         return depth_map
 
     def estimate_with_visualization(self, frame):
-        depth_map, _ = self.estimate_depth(frame)
+        depth_map = self.estimate(frame)
         
         # Visualization: Close=Bright, Far=Dark
         vis_raw = (1.0 - depth_map) * 255
