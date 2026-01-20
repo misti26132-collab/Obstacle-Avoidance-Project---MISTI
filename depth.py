@@ -16,10 +16,6 @@ class DepthEstimator:
         self.transform = transforms.small_transform
 
     def estimate(self, frame):
-        """
-        Takes a BGR frame (OpenCV) and returns:
-        - normalized depth map (numpy array)
-        """
 
         # Convert BGR → RGB
         img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
