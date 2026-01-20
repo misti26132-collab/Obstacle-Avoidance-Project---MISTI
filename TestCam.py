@@ -4,18 +4,12 @@ import numpy as np
 from ultralytics import YOLO
 
 class ObstacleDetector:
-    def __init__(self, model_path):
-        """
-        Initialize obstacle detector with YOLO and depth estimation
-        
-        Args:
-            model_path: Path to YOLOv8 model weights
-        """
+    def __init__(self, model_path, depth_estimator):
         self.model = YOLO(model_path)
-        self.depth_estimator = DepthEstimator()
+        self.depth_estimator = depth_estimator
         self.frame_width = None
         self.frame_height = None
-    
+
     def process(self, frame):
         """
         Process frame to detect obstacles and estimate direction/distance
