@@ -19,7 +19,7 @@ def main():
     # Initialize components (share depth estimator)
     depth_estimator = DepthEstimator()
     detector = ObstacleDetector("yolov8n.pt", depth_estimator)
-    speaker = SpeechEngine(cooldown=2.5)
+    speaker = SpeechEngine(cooldown=3.0)  # 3 seconds default cooldown
     
     print("Obstacle Avoidance System Started")
     print("Press 'q' to quit")
@@ -28,8 +28,8 @@ def main():
     for _ in range(5):
         cap.read()
     
-    last_print_time = time.time()
-    print_interval = 0.5  # Print debug info every 0.5 seconds
+    fps_counter = 0
+    fps_start = time.time()
 
     while True:
         # CRITICAL: Flush buffer to get latest frame
@@ -43,15 +43,19 @@ def main():
         # Process frame
         frame, direction, distance = detector.process(frame)
 
-        # Audio feedback with rate-limited debug output
-        current_time = time.time()
+        # Audio feedback (non-blocking)
         if direction is not None and distance is not None:
-            if current_time - last_print_time >= print_interval:
-                print(f"Detection: {direction} - {distance}")
-                last_print_time = current_time
             speaker.speak(direction, distance)
 
-        cv2.imshow("Obstacle Avoidance Demo", frame)
+        # Display FPS every 30 frames
+        fps_counter += 1
+        if fps_counter % 30 == 0:
+            elapsed = time.time() - fps_start
+            fps = 30 / elapsed if elapsed > 0 else 0
+            print(f"FPS: {fps:.1f} | Latest: {direction} - {distance}")
+            fps_start = time.time()
+
+        cv2.imshow("Obstacle Avoidance", frame)
 
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break
@@ -59,7 +63,6 @@ def main():
     cap.release()
     cv2.destroyAllWindows()
     speaker.stop()
-    print("System stopped")
     print("System stopped")
 
 if __name__ == "__main__":
