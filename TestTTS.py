@@ -5,21 +5,27 @@ import queue
 import time
 from ultralytics import YOLO
 
-# ==============================
-# TEXT TO SPEECH (WINDOWS-SAFE)
-# ==============================
+# ==========================================================
+# TEXT-TO-SPEECH (WINDOWS SAFE – ZIRA VOICE)
+# ==========================================================
 
 speech_queue = queue.Queue()
 
 def speech_worker():
     """
-    WINDOWS-SAFE TTS WORKER
-    Creates a NEW pyttsx3 engine for each message.
-    This avoids the silent freeze bug.
+    Windows-safe TTS worker.
+    Creates a NEW pyttsx3 engine for every message.
+    Forces Microsoft David voice by exact SAPI ID.
     """
+    DAVID_VOICE_ID = (
+        "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Speech\\Voices\\Tokens\\"
+        "TTS_MS_EN-US_DAVID_11.0"
+    )
+
     while True:
         text = speech_queue.get()
 
+        # Shutdown signal
         if text is None:
             break
 
@@ -27,12 +33,13 @@ def speech_worker():
             print(f"[TTS] {text}")
 
             engine = pyttsx3.init()
-            engine.setProperty('rate', 175)
+            engine.setProperty("rate", 175)
+            engine.setProperty("voice", DAVID_VOICE_ID)
+
             engine.say(text)
             engine.runAndWait()
             engine.stop()
-
-            del engine  # force cleanup
+            del engine
 
         except Exception as e:
             print("[TTS ERROR]", e)
@@ -41,7 +48,9 @@ def speech_worker():
 
 
 def request_speech(text):
-    # Prevent speech backlog
+    """
+    Clears old queued messages so speech does not stack.
+    """
     while not speech_queue.empty():
         try:
             speech_queue.get_nowait()
@@ -51,50 +60,57 @@ def request_speech(text):
     speech_queue.put(text)
 
 
+# Start TTS thread
 tts_thread = threading.Thread(target=speech_worker, daemon=True)
 tts_thread.start()
 
-# ==============================
-# YOLO SETUP
-# ==============================
+# ==========================================================
+# YOLOv8 SETUP
+# ==========================================================
 
 model = YOLO("yolov8n.pt")
+
+# Force CPU + FP32 (avoids half-precision crashes on Windows)
 model.to("cpu")
 model.model.fp16 = False
 
-# ==============================
+# ==========================================================
 # VIDEO CAPTURE
-# ==============================
+# ==========================================================
 
 cap = cv2.VideoCapture(0)
+
 if not cap.isOpened():
-    print("ERROR: Camera not available")
+    print("ERROR: Camera not available.")
     exit()
 
-# ==============================
+# ==========================================================
 # LOGIC PARAMETERS
-# ==============================
+# ==========================================================
 
-COOLDOWN_TIME = 3.0
+COOLDOWN_TIME = 3.0      # Seconds between spoken messages
 last_spoken_time = 0
 last_direction = None
 
-print("System running. Press Q to quit.")
+print("Obstacle avoidance running (Zira voice).")
+print("Press 'Q' to quit.")
 
-# ==============================
+# ==========================================================
 # MAIN LOOP
-# ==============================
+# ==========================================================
 
 while True:
     ret, frame = cap.read()
     if not ret:
         break
 
-    results = model(frame, conf=0.5, verbose=False)
+    # Run YOLO detection
+    results = model(frame, classes=[0, 15, 16, 24, 56], conf=0.5, verbose=False)
     boxes = results[0].boxes
     current_time = time.time()
 
     if boxes is not None and len(boxes) > 0:
+        # Use the most confident detection
         x_center = boxes.xywh[0][0].item()
         frame_width = frame.shape[1]
 
@@ -108,7 +124,7 @@ while True:
             direction = "center"
             message = "Obstacle ahead. Stop."
 
-        # Speak again if cooldown passed OR direction changed
+        # Speak if cooldown passed or direction changed
         if (
             current_time - last_spoken_time > COOLDOWN_TIME
             or direction != last_direction
@@ -118,17 +134,19 @@ while True:
             last_direction = direction
 
     else:
+        # Reset when no obstacle is detected
         last_direction = None
 
+    # Display results
     annotated_frame = results[0].plot()
-    cv2.imshow("Obstacle Detection + TTS", annotated_frame)
+    cv2.imshow("Obstacle Detection + TTS (DAVID)", annotated_frame)
 
-    if cv2.waitKey(1) & 0xFF == ord('q'):
+    if cv2.waitKey(1) & 0xFF == ord("q"):
         break
 
-# ==============================
+# ==========================================================
 # CLEANUP
-# ==============================
+# ==========================================================
 
 speech_queue.put(None)
 cap.release()
