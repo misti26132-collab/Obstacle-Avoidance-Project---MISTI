@@ -1,86 +1,101 @@
-import cv2
 import pyttsx3
-import threading
-import queue
 import time
-from ultralytics import YOLO
 
-# 1. Setup the Speech Worker
-speech_queue = queue.Queue()
 
-def speech_worker():
-    while True:
-        text = speech_queue.get()
-        if text is None: 
-            break
+class SpeechEngine:
+    def __init__(self, cooldown=3.0):
+        self.engine = pyttsx3.init()
+        self.engine.setProperty("rate", 175)  # Slightly faster for urgency
+        self.engine.setProperty("volume", 1.0)
+
+        self.cooldown = cooldown
+        self.last_spoken_time = 0.0
+        self.last_message = None
+        self.last_direction = None
+        self.last_distance = None
+        self.distance_priority = {"very_close": 3, "close": 2, "far": 1}
+
+        print("[Speech] Engine initialized (main-thread mode)")
+
+    def speak(self, direction, distance):
+        message = self._build_message(direction, distance)
+        if not message:
+            return
+
+        now = time.time()
+        elapsed = now - self.last_spoken_time
+
+        # Dynamic cooldown based on urgency
+        if distance == "very_close":
+            min_cooldown = 0.5  # Repeat urgent warnings quickly
+        elif distance == "close":
+            min_cooldown = 2.0  # Moderate frequency
+        else:
+            min_cooldown = 4.0  # Infrequent for far objects
+
+        # Check if object got closer (escalation)
+        got_closer = False
+        if self.last_distance is not None and distance is not None:
+            current_priority = self.distance_priority.get(distance, 0)
+            last_priority = self.distance_priority.get(self.last_distance, 0)
+            got_closer = current_priority > last_priority
+
+        # Allow re-announcement if direction changed OR distance changed
+        situation_changed = (direction != self.last_direction) or (distance != self.last_distance)
+        
+        # Speak if: enough time passed OR object got closer OR situation became critical
+        should_speak = (
+            elapsed >= min_cooldown or 
+            got_closer or 
+            (situation_changed and distance == "very_close")
+        )
+        
+        if should_speak:
+            try:
+                print(f"[Speech] Speaking: {message} (got_closer={got_closer})")
+                self.engine.say(message)
+                self.engine.runAndWait()
+                print("[Speech] Finished speaking")
+
+                self.last_spoken_time = now
+                self.last_message = message
+                self.last_direction = direction
+                self.last_distance = distance
+
+            except Exception as e:
+                print(f"[Speech] Speech error: {e}")
+
+    def stop(self):
         try:
-            print(f"Executing Speech: {text}")
-            engine = pyttsx3.init()
-            
-            engine.setProperty('rate', 180)
-            
-            engine.say(text)
-            engine.runAndWait()
-            
-            engine.stop()
-            del engine 
-            
-        except Exception as e:
-            print(f"Speech Thread Error: {e}")
+            self.engine.stop()
+        except Exception:
+            pass
+        print("[Speech] Stopped")
+
+    def _build_message(self, direction, distance):
+        # Priority messages for very close obstacles
+        if distance == "very_close":
+            if direction == "center":
+                return "Stop! Obstacle very close ahead!"
+            elif direction == "left":
+                return "Danger! Very close on the left!"
+            elif direction == "right":
+                return "Danger! Very close on the right!"
         
-        finally:
-            speech_queue.task_done()
-
-worker_thread = threading.Thread(target=speech_worker, daemon=True)
-worker_thread.start()
-
-def request_speech(text):
-    if speech_queue.qsize() < 2:
-        speech_queue.put(text)
-
-# Initialize YOLO and Video
-model = YOLO('yolov8n.pt')
-url = "camera ip here" # Replace with your IP camera
-cap = cv2.VideoCapture(url) # URL or 0 for webcam
-
-detection_frames = 0
-COOLDOWN_TIME = 3.0  # Seconds between speech triggers
-last_command_time = 0
-
-while cap.isOpened():
-    success, frame = cap.read()
-    if not success: break
-
-    results = model(frame, conf=0.5, verbose=False)
-    boxes = results[0].boxes
-    current_time = time.time()
-
-    if len(boxes) > 0:
-        detection_frames += 1
+        # Close obstacles
+        if distance == "close":
+            if direction == "center":
+                return "Obstacle ahead."
+            elif direction == "left":
+                return "Obstacle on the left."
+            elif direction == "right":
+                return "Obstacle on the right."
         
-        if detection_frames >= 5 and (current_time - last_command_time > COOLDOWN_TIME):
-            x_center = boxes[0].xywh[0][0].item()
-            width = frame.shape[1]
-
-            if x_center < (width / 3):
-                msg = "Obstacle left, move right"
-            elif x_center > (2 * width / 3):
-                msg = "Obstacle right, move left"
-            else:
-                msg = "Obstacle center, stop"
-
-            request_speech(msg)
-            last_command_time = current_time
-            detection_frames = 0 
-    else:
-        detection_frames = 0
-
-    annotated_frame = results[0].plot()
-    cv2.imshow("YOLO Navigation", annotated_frame)
-
-    if cv2.waitKey(1) & 0xFF == ord("q"):
-        break
-
-speech_queue.put(None)
-cap.release()
-cv2.destroyAllWindows()
+        # Far obstacles - minimal warnings
+        if distance == "far":
+            if direction == "center":
+                return "Something ahead."
+            # Don't warn about far left/right obstacles
+            return ""
+        
+        return ""

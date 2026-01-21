@@ -1,45 +1,151 @@
-import cv2
 import torch
-from ultralytics import YOLO
-
-model = YOLO('yolov8n.pt')
-Cap = cv2.VideoCapture(0)
-results = model.predict(source=0, show=True, conf=0.5)
+import cv2
+import numpy as np
+from collections import deque
+import time
 
 class DepthEstimator:
-    def __init__(self, model_path='yolov8n.pt', device='gpu'):
-        # Load YOLOv8 model
-        self.model = YOLO(model_path)
-        self.device = device
+    def __init__(self, device=None, max_retries=3):
+        """
+        Initialize MiDaS depth estimator with adaptive scaling
+        """
+        if device is None:
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            self.device = device
+        
+        print(f"DepthEstimator using device: {self.device}")
 
-    def estimate_depth(self, image):
-        # Preprocess the image
-        img = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        results = self.model(img)
+        # Try to load with retries for network issues
+        self.midas = None
+        self.transform = None
+        
+        for attempt in range(max_retries):
+            try:
+                print(f"Loading MiDaS model (attempt {attempt + 1}/{max_retries})...")
+                self.midas = torch.hub.load("intel-isl/MiDaS", "MiDaS_small", trust_repo=True)
+                self.midas.to(self.device)
+                self.midas.eval()
+                
+                print("Loading transforms...")
+                transforms = torch.hub.load("intel-isl/MiDaS", "transforms", trust_repo=True)
+                self.transform = transforms.small_transform
+                
+                print("✓ MiDaS model loaded successfully")
+                break
+                
+            except Exception as e:
+                print(f"✗ Attempt {attempt + 1} failed: {type(e).__name__}")
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                    print(f"  Retrying in {wait_time} seconds...")
+                    time.sleep(wait_time)
+                else:
+                    raise RuntimeError(
+                        f"Failed to load MiDaS model after {max_retries} attempts.\n"
+                        f"Last error: {e}\n"
+                        f"This is usually a network issue. Check your internet connection and try again."
+                    )
+        
+        # Adaptive scaling components
+        self.scale_history = deque(maxlen=30)  # Track last 30 frames
+        self.min_history = deque(maxlen=30)
+        self.initialized = False
 
-        # Extract depth information (dummy implementation for illustration)
-        depth_map = self._dummy_depth_estimation(results)
+    def estimate(self, frame):
+        """
+        Estimate depth with ADAPTIVE scaling to prevent inconsistencies
+        
+        Returns:
+            depth_map: Normalized depth map where:
+                      - Higher values (closer to 1) = CLOSER objects
+                      - Lower values (closer to 0) = FARTHER objects
+        """
+        if frame is None or frame.size == 0:
+            raise ValueError("Invalid frame provided to depth estimator")
+
+        img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        input_batch = self.transform(img).to(self.device)
+
+        with torch.no_grad():
+            prediction = self.midas(input_batch)
+            prediction = torch.nn.functional.interpolate(
+                prediction.unsqueeze(1),
+                size=img.shape[:2],
+                mode="bicubic",
+                align_corners=False,
+            ).squeeze()
+
+        depth_map_raw = prediction.cpu().numpy()
+
+        # ==========================================================
+        # ADAPTIVE SCALING - Fixes inconsistent depth detection
+        # ==========================================================
+        
+        # Calculate percentiles for this frame
+        p5 = np.percentile(depth_map_raw, 5)   # Near objects
+        p95 = np.percentile(depth_map_raw, 95) # Far objects
+        
+        # Store in history
+        self.min_history.append(p5)
+        self.scale_history.append(p95)
+        
+        # Use smoothed values (prevents jumping between frames)
+        if len(self.scale_history) >= 10:
+            smooth_min = np.median(self.min_history)
+            smooth_max = np.median(self.scale_history)
+            self.initialized = True
+        else:
+            # Initial frames - use current values
+            smooth_min = p5
+            smooth_max = p95
+        
+        # Normalize to 0-1 range with adaptive scaling
+        depth_range = smooth_max - smooth_min
+        if depth_range < 1e-6:  # Prevent division by zero
+            depth_map = np.zeros_like(depth_map_raw)
+        else:
+            depth_map = (depth_map_raw - smooth_min) / depth_range
+            depth_map = np.clip(depth_map, 0, 1)
+        
+        # Invert: High raw disparity (close) -> High output (1.0)
+        # So that: 1.0 = CLOSE, 0.0 = FAR
+        depth_map = 1.0 - depth_map
 
         return depth_map
 
-    def _dummy_depth_estimation(self, results):
-        # This is a placeholder for actual depth estimation logic
-        # Here we just create a dummy depth map based on detection results
-        depth_map = torch.zeros((results.imgs[0].shape[0], results.imgs[0].shape[1]))
-        for det in results.xyxy[0]:
-            x1, y1, x2, y2, conf, cls = det
-            depth_value = 1.0 / (conf + 1e-6)  # Dummy depth value based on confidence
-            depth_map[int(y1):int(y2), int(x1):int(x2)] = depth_value
-        return depth_map.numpy()
-
-while Cap.isOpened():
-    success, frame = Cap.read()
-    if not success:
-        break
-    results = model(frame)
-    annotated_frame = results[0].plot()
-    cv2.imshow("YOLO Real-Time Detection", annotated_frame)
-    if cv2.waitKey(1) & 0xFF == ord("q"):
-        break
-Cap.release()
-cv2.destroyAllWindows()
+    def estimate_with_visualization(self, frame):
+        depth_map = self.estimate(frame)
+        
+        # Visualization: Close=Bright, Far=Dark
+        vis_raw = depth_map * 255  # High values (close) = bright
+        depth_vis = vis_raw.astype(np.uint8)
+        
+        # Apply MAGMA colormap
+        depth_colored = cv2.applyColorMap(depth_vis, cv2.COLORMAP_MAGMA)
+        
+        return depth_map, depth_colored
+    
+    def get_distance_at_point(self, depth_map, x, y, radius=5):
+        """
+        Get average depth around a point
+        
+        Returns:
+            Average depth value (1.0 = close, 0.0 = far)
+        """
+        h, w = depth_map.shape
+        x1 = max(0, int(x - radius))
+        y1 = max(0, int(y - radius))
+        x2 = min(w, int(x + radius))
+        y2 = min(h, int(y + radius))
+        
+        region = depth_map[y1:y2, x1:x2]
+        return region.mean() if region.size > 0 else 0.5
+    
+    def visualize_depth(self, depth_map_normalized):
+        """
+        Visualize depth map with colormap
+        """
+        depth_vis = (depth_map_normalized * 255).astype(np.uint8)
+        colored_depth = cv2.applyColorMap(depth_vis, cv2.COLORMAP_JET)
+        return colored_depth
