@@ -3,3 +3,6 @@ opencv-python
 pyttsx3
 torch
 numpy
+inference-sdk
+python-dotenv
+timm
