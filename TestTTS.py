@@ -1,6 +1,8 @@
+import queue
+import threading
 import cv2
 import time
-<<<<<<< HEAD
+import pyttsx3
 from ultralytics import YOLO
 
 # ==========================================================
@@ -96,7 +98,6 @@ print("Press 'Q' to quit.")
 # ==========================================================
 # MAIN LOOP
 # ==========================================================
-=======
 from Speech import SpeechEngine
 
 cap = cv2.VideoCapture(0)
@@ -117,20 +118,13 @@ test_sequence = [
 
 test_idx = 0
 last_test_time = time.time()
->>>>>>> 816bf82e436a71ffa66d34603220a60a61a16893
 
 while True:
     ret, frame = cap.read()
     if not ret:
         break
 
-<<<<<<< HEAD
-    # Run YOLO detection
-    results = model(frame, classes=[0, 15, 16, 24, 56], conf=0.5, verbose=False)
-    boxes = results[0].boxes
-=======
     # Cycle through test messages every 3 seconds
->>>>>>> 816bf82e436a71ffa66d34603220a60a61a16893
     current_time = time.time()
     if current_time - last_test_time >= 3.0:
         direction, distance = test_sequence[test_idx]
@@ -140,7 +134,6 @@ while True:
         test_idx = (test_idx + 1) % len(test_sequence)
         last_test_time = current_time
 
-<<<<<<< HEAD
     if boxes is not None and len(boxes) > 0:
         # Use the most confident detection
         x_center = boxes.xywh[0][0].item()
@@ -181,13 +174,11 @@ while True:
 # ==========================================================
 
 speech_queue.put(None)
-=======
     cv2.imshow("TTS Test", frame)
 
     if cv2.waitKey(1) & 0xFF == ord("q"):
         break
 
->>>>>>> 816bf82e436a71ffa66d34603220a60a61a16893
 cap.release()
 cv2.destroyAllWindows()
 speaker.stop()
