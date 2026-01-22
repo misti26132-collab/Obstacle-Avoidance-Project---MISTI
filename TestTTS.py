@@ -1,82 +1,6 @@
-import queue
-import threading
 import cv2
 import time
-import pyttsx3
-from ultralytics import YOLO
-
-# ==========================================================
-# TEXT-TO-SPEECH (WINDOWS SAFE – ZIRA VOICE)
-# ==========================================================
-
-speech_queue = queue.Queue()
-
-def speech_worker():
-    """
-    Windows-safe TTS worker.
-    Creates a NEW pyttsx3 engine for every message.
-    Forces Microsoft David voice by exact SAPI ID.
-    """
-    DAVID_VOICE_ID = (
-        "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Speech\\Voices\\Tokens\\"
-        "TTS_MS_EN-US_DAVID_11.0"
-    )
-
-    while True:
-        text = speech_queue.get()
-
-        # Shutdown signal
-        if text is None:
-            break
-
-        try:
-            print(f"[TTS] {text}")
-
-            engine = pyttsx3.init()
-            engine.setProperty("rate", 175)
-            engine.setProperty("voice", DAVID_VOICE_ID)
-
-            engine.say(text)
-            engine.runAndWait()
-            engine.stop()
-            del engine
-
-        except Exception as e:
-            print("[TTS ERROR]", e)
-
-        speech_queue.task_done()
-
-
-def request_speech(text):
-    """
-    Clears old queued messages so speech does not stack.
-    """
-    while not speech_queue.empty():
-        try:
-            speech_queue.get_nowait()
-        except queue.Empty:
-            break
-
-    speech_queue.put(text)
-
-
-# Start TTS thread
-tts_thread = threading.Thread(target=speech_worker, daemon=True)
-tts_thread.start()
-
-# ==========================================================
-# YOLOv8 SETUP
-# ==========================================================
-
-model = YOLO("yolov8n.pt")
-
-# Force CPU + FP32 (avoids half-precision crashes on Windows)
-model.to("cpu")
-model.model.fp16 = False
-
-# ==========================================================
-# VIDEO CAPTURE
-# ==========================================================
+from Speech import SpeechEngine
 
 cap = cv2.VideoCapture(0)
 
@@ -84,102 +8,69 @@ if not cap.isOpened():
     print("ERROR: Camera not available.")
     exit()
 
-# ==========================================================
-# LOGIC PARAMETERS
-# ==========================================================
-
-COOLDOWN_TIME = 3.0      # Seconds between spoken messages
-last_spoken_time = 0
-last_direction = None
-
-print("Obstacle avoidance running (Zira voice).")
-print("Press 'Q' to quit.")
-
-# ==========================================================
-# MAIN LOOP
-# ==========================================================
-from Speech import SpeechEngine
-
-cap = cv2.VideoCapture(0)
+# FIXED: Use config for speech settings
 speaker = SpeechEngine(cooldown=2.0)
 
+print("=" * 60)
 print("TTS Test - Testing all distance/direction combinations")
+print("=" * 60)
 print("Press 'q' to quit")
+print()
 
 test_sequence = [
-    ("center", "very_close"),
-    ("left", "very_close"),
-    ("right", "very_close"),
-    ("center", "close"),
-    ("left", "close"),
-    ("right", "close"),
-    ("center", "far"),
+    ("center", "very_close", "person"),
+    ("left", "very_close", "chair"),
+    ("right", "very_close", "car"),
+    ("center", "close", "person"),
+    ("left", "close", "bench"),
+    ("right", "close", "bicycle"),
+    ("center", "far", "person"),
 ]
 
 test_idx = 0
 last_test_time = time.time()
 
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
+print("Starting test sequence...")
 
-    # Cycle through test messages every 3 seconds
-    current_time = time.time()
-    if current_time - last_test_time >= 3.0:
-        direction, distance = test_sequence[test_idx]
-        print(f"\nTesting: {direction} - {distance}")
-        speaker.speak(direction, distance)
+try:
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print("ERROR: Failed to read frame")
+            break
+
+        # Cycle through test messages every 3 seconds
+        current_time = time.time()
+        if current_time - last_test_time >= 3.0:
+            direction, distance, obstacle = test_sequence[test_idx]
+            print(f"\n[Test {test_idx + 1}/{len(test_sequence)}] Testing: {direction} - {distance} - {obstacle}")
+            speaker.speak(direction, distance, obstacle)
+            
+            test_idx = (test_idx + 1) % len(test_sequence)
+            last_test_time = current_time
+
+        # Display the camera feed
+        cv2.putText(frame, f"Test {test_idx + 1}/{len(test_sequence)}", (10, 30), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        cv2.putText(frame, "Press 'q' to quit", (10, 70), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         
-        test_idx = (test_idx + 1) % len(test_sequence)
-        last_test_time = current_time
+        cv2.imshow("TTS Test", frame)
 
-    if boxes is not None and len(boxes) > 0:
-        # Use the most confident detection
-        x_center = boxes.xywh[0][0].item()
-        frame_width = frame.shape[1]
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            break
 
-        if x_center < frame_width / 3:
-            direction = "left"
-            message = "Obstacle on the left. Move right."
-        elif x_center > 2 * frame_width / 3:
-            direction = "right"
-            message = "Obstacle on the right. Move left."
-        else:
-            direction = "center"
-            message = "Obstacle ahead. Stop."
+except KeyboardInterrupt:
+    print("\n[System] Interrupted by user")
 
-        # Speak if cooldown passed or direction changed
-        if (
-            current_time - last_spoken_time > COOLDOWN_TIME
-            or direction != last_direction
-        ):
-            request_speech(message)
-            last_spoken_time = current_time
-            last_direction = direction
-
-    else:
-        # Reset when no obstacle is detected
-        last_direction = None
-
-    # Display results
-    annotated_frame = results[0].plot()
-    cv2.imshow("Obstacle Detection + TTS (DAVID)", annotated_frame)
-
-    if cv2.waitKey(1) & 0xFF == ord("q"):
-        break
-
-# ==========================================================
-# CLEANUP
-# ==========================================================
-
-speech_queue.put(None)
-    cv2.imshow("TTS Test", frame)
-
-    if cv2.waitKey(1) & 0xFF == ord("q"):
-        break
-
-cap.release()
-cv2.destroyAllWindows()
-speaker.stop()
-print("TTS test completed")
+finally:
+    # ==========================================================
+    # CLEANUP
+    # ==========================================================
+    print("\n" + "=" * 60)
+    print("Cleaning up...")
+    cap.release()
+    cv2.destroyAllWindows()
+    speaker.stop()
+    print("TTS test completed")
+    print("=" * 60)
