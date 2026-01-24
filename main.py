@@ -408,8 +408,12 @@ def main():
     
     # Camera setup
     logger.info("[Camera] Initializing camera...")
-    cap = cv2.VideoCapture(args.camera)
-    
+    cap = cv2.VideoCapture(0, cv2.CAP_ANY)   
+
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    cap.set(cv2.CAP_PROP_FPS, 30)
+
     if not cap.isOpened():
         logger.error(f"[Camera] Could not open camera {args.camera}")
         print(f"\n[ERROR] Could not open camera {args.camera}. Please check connection.")
