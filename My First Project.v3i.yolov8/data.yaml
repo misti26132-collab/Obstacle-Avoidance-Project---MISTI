@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 8
+names: ['Chair', 'Couch', 'Pillar', 'Table', 'Tv', 'Wall', 'chair', 'objects']
+
+roboflow:
+  workspace: e-3to3k
+  project: my-first-project-9jdke
+  version: 3
+  license: MIT
+  url: https://universe.roboflow.com/e-3to3k/my-first-project-9jdke/dataset/3
