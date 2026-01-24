@@ -5,7 +5,6 @@ import argparse
 import logging
 from depth import DepthEstimator
 from Speech import SpeechEngine
-from AI import RoboflowDetector
 from ultralytics import YOLO
 from health_check import SystemHealthMonitor
 import config
@@ -46,15 +45,25 @@ def calculate_iou(box1, box2):
 
 class DualModelDetector:
     
-    def __init__(self, depth_estimator, roboflow_detector, roboflow_interval=5, use_yolo_medium=False):
-        # IMPROVED: Option to use better model
+    def __init__(self, depth_estimator, custom_model_path='runs/detect/blind_navigation/obstacles_v1/weights/best.pt', use_yolo_medium=False):
+        # Load COCO pretrained model for general objects
         model_name = 'yolov8m.pt' if use_yolo_medium else 'yolov8n.pt'
-        logger.info(f"[DualModel] Loading {model_name}...")
+        logger.info(f"[DualModel] Loading COCO model: {model_name}...")
         logger.info("[DualModel] (First run will download model, please wait...)")
-        self.yolo_model = YOLO(model_name)
+        self.yolo_coco = YOLO(model_name)
         logger.info(f"[DualModel] {model_name} loaded successfully")
         
-        self.roboflow_detector = roboflow_detector
+        # Load your custom trained model
+        logger.info(f"[DualModel] Loading custom trained model: {custom_model_path}...")
+        try:
+            self.yolo_custom = YOLO(custom_model_path)
+            logger.info("[DualModel] Custom model loaded successfully")
+            logger.info(f"[DualModel] Custom classes: {list(self.yolo_custom.names.values())}")
+        except Exception as e:
+            logger.error(f"[DualModel] Failed to load custom model: {e}")
+            logger.error(f"[DualModel] Make sure the model exists at: {custom_model_path}")
+            raise
+        
         self.depth_estimator = depth_estimator
         self.frame_width = None
         self.frame_height = None
@@ -66,20 +75,16 @@ class DualModelDetector:
             'bench', 'backpack', 'suitcase', 'handbag', 'bottle'
         ]
         
-        # Roboflow detection interval (to avoid excessive API calls)
-        self.roboflow_interval = roboflow_interval
         self.frame_count = 0
-        self.last_roboflow_detections = []
         
-        logger.info(f"[DualModel] Initialized: {model_name} + Roboflow Custom Model")
-        logger.info(f"[DualModel] Roboflow will run every {self.roboflow_interval} frames")
+        logger.info(f"[DualModel] Initialized: COCO ({model_name}) + Custom Model")
         logger.info(f"[DualModel] Monitoring {len(self.coco_obstacle_classes)} COCO obstacle classes")
-        logger.info(f"[DualModel] IMPROVED: {len(config.FURNITURE_CLASSES)} furniture classes use {config.YOLO_CONFIDENCE_FURNITURE} confidence")
+        logger.info(f"[DualModel] Custom model has {len(self.yolo_custom.names)} classes")
+        logger.info(f"[DualModel] {len(config.FURNITURE_CLASSES)} furniture classes use {config.YOLO_CONFIDENCE_FURNITURE} confidence")
     
     def process(self, frame):
         """
         Process frame with both detection models and depth estimation
-        IMPROVED: Better handling of furniture with class-specific thresholds
         
         Args:
             frame: OpenCV BGR frame
@@ -97,70 +102,66 @@ class DualModelDetector:
             logger.error(f"[DualModel] Depth estimation error: {e}")
             return frame, None, None, None
         
-        # 1. Run YOLOv8 (every frame - fast and local)
-        # IMPROVED: Use lower confidence initially to catch more detections
+        # 1. Run COCO YOLOv8 (for general objects)
         try:
-            yolo_results = self.yolo_model(frame, conf=config.YOLO_CONFIDENCE_FURNITURE, verbose=False)
+            yolo_results = self.yolo_coco(frame, conf=config.YOLO_CONFIDENCE_FURNITURE, verbose=False)
             yolo_boxes = yolo_results[0].boxes
         except Exception as e:
-            logger.error(f"[DualModel] YOLO error: {e}")
+            logger.error(f"[DualModel] YOLO COCO error: {e}")
             yolo_boxes = []
         
-        # IMPROVED: Filter YOLO detections with class-specific confidence thresholds
+        # Filter YOLO COCO detections with class-specific confidence thresholds
         yolo_detections = []
         for box in yolo_boxes:
             class_id = int(box.cls[0])
-            class_name = self.yolo_model.names[class_id]
+            class_name = self.yolo_coco.names[class_id]
             confidence = float(box.conf[0])
             
             if class_name in self.coco_obstacle_classes:
-                # IMPROVED: Apply different thresholds for furniture vs other objects
+                # Apply different thresholds for furniture vs other objects
                 if class_name in config.FURNITURE_CLASSES:
-                    min_conf = config.YOLO_CONFIDENCE_FURNITURE  # Lower threshold (0.3)
+                    min_conf = config.YOLO_CONFIDENCE_FURNITURE
                 else:
-                    min_conf = config.YOLO_CONFIDENCE  # Standard threshold (0.5)
+                    min_conf = config.YOLO_CONFIDENCE
                 
-                # Only add if meets the class-specific threshold
                 if confidence >= min_conf:
                     yolo_detections.append({
                         'box': box.xyxy[0].cpu().numpy(),
                         'class': class_name,
                         'confidence': confidence,
-                        'source': 'yolo'
+                        'source': 'coco'
                     })
         
-        # 2. Run Roboflow (throttled to save API calls)
-        if self.frame_count % self.roboflow_interval == 0:
-            try:
-                result = self.roboflow_detector.detect_from_frame(frame, use_cache=True)
-                if result:
-                    parsed = self.roboflow_detector.parse_detections(result)
-                    self.last_roboflow_detections = []
-                    
-                    for det in parsed:
-                        self.last_roboflow_detections.append({
-                            'box': det['box'],
-                            'class': det['class'],
-                            'confidence': det['confidence'],
-                            'source': 'roboflow'
-                        })
-                    
-                    if len(self.last_roboflow_detections) > 0:
-                        logger.info(
-                            f"[DualModel] Roboflow detected "
-                            f"{len(self.last_roboflow_detections)} custom obstacles"
-                        )
-            except Exception as e:
-                logger.error(f"[DualModel] Roboflow error: {e}")
+        # 2. Run Custom YOLOv8 (your trained model)
+        try:
+            custom_results = self.yolo_custom(frame, conf=0.3, verbose=False)
+            custom_boxes = custom_results[0].boxes
+        except Exception as e:
+            logger.error(f"[DualModel] Custom YOLO error: {e}")
+            custom_boxes = []
+        
+        # Parse custom model detections
+        custom_detections = []
+        for box in custom_boxes:
+            class_id = int(box.cls[0])
+            class_name = self.yolo_custom.names[class_id]
+            confidence = float(box.conf[0])
+            
+            custom_detections.append({
+                'box': box.xyxy[0].cpu().numpy(),
+                'class': class_name,
+                'confidence': confidence,
+                'source': 'custom'
+            })
         
         # Combine detections (remove duplicates based on IoU)
-        all_detections = self._merge_detections(yolo_detections, self.last_roboflow_detections)
+        all_detections = self._merge_detections(yolo_detections, custom_detections)
         
-        # IMPROVED: Log detection statistics every 100 frames
+        # Log detection statistics every 100 frames
         if self.frame_count % 100 == 0 and len(all_detections) > 0:
-            yolo_count = len(yolo_detections)
-            robo_count = len(self.last_roboflow_detections)
-            logger.info(f"[Stats] YOLO: {yolo_count}, Roboflow: {robo_count}, Total: {len(all_detections)}")
+            coco_count = len(yolo_detections)
+            custom_count = len(custom_detections)
+            logger.info(f"[Stats] COCO: {coco_count}, Custom: {custom_count}, Total: {len(all_detections)}")
         
         if len(all_detections) == 0:
             return frame, None, None, None
@@ -181,29 +182,30 @@ class DualModelDetector:
         obstacle_class = closest['class'] if closest else None
         return annotated_frame, direction, distance, obstacle_class
     
-    def _merge_detections(self, yolo_dets, roboflow_dets):
-        all_detections = list(yolo_dets)  # Start with YOLO
+    def _merge_detections(self, coco_dets, custom_dets):
+        """Merge COCO and custom detections, removing duplicates"""
+        all_detections = list(coco_dets)  # Start with COCO
         
-        # Add Roboflow detections if they don't overlap with YOLO
-        for rf_det in roboflow_dets:
+        # Add custom detections if they don't overlap with COCO
+        for custom_det in custom_dets:
             is_duplicate = False
-            rf_box = rf_det['box']
+            custom_box = custom_det['box']
             
-            for yolo_det in yolo_dets:
-                yolo_box = yolo_det['box']
-                iou = calculate_iou(rf_box, yolo_box)
+            for coco_det in coco_dets:
+                coco_box = coco_det['box']
+                iou = calculate_iou(custom_box, coco_box)
                 
-                # IMPROVED: Higher IoU threshold = keep more Roboflow detections
                 if iou > config.IOU_THRESHOLD_MERGE:
                     is_duplicate = True
                     break
             
             if not is_duplicate:
-                all_detections.append(rf_det)
+                all_detections.append(custom_det)
         
         return all_detections
     
     def _analyze_obstacles(self, detections, depth_map):
+        """Find the closest obstacle and determine its direction/distance"""
         closest_obstacle = None
         closest_depth = 0.0  # Higher depth = closer
         
@@ -224,14 +226,13 @@ class DualModelDetector:
                 depth_map, center_x, center_y, radius=10
             )
             
-            # IMPROVED: Smart furniture depth priority
-            # For far furniture, use additive boost; for close furniture, use multiplicative
+            # Smart furniture depth priority
             if detection['class'] in config.FURNITURE_CLASSES:
                 if depth_val < 0.3:
-                    # Far furniture: additive boost (helps with barely visible furniture)
+                    # Far furniture: additive boost
                     depth_val = min(depth_val + config.FURNITURE_DEPTH_ADDITIVE, 1.0)
                 else:
-                    # Close furniture: multiplicative boost (emphasizes nearby obstacles)
+                    # Close furniture: multiplicative boost
                     depth_val = min(depth_val * config.FURNITURE_DEPTH_BOOST, 1.0)
             
             # Higher depth = closer (due to inversion in depth estimator)
@@ -282,7 +283,7 @@ class DualModelDetector:
         return direction, distance, closest_obstacle
     
     def _draw_detections(self, frame, detections, closest):
-        
+        """Draw bounding boxes on frame"""
         annotated = frame.copy()
         
         for detection in detections:
@@ -295,12 +296,12 @@ class DualModelDetector:
                 x1, y1, x2, y2 = map(int, box[:4])
             
             # Color based on source
-            if detection['source'] == 'yolo':
-                color = (0, 255, 0)  # Green for YOLO
-                label_suffix = " [Y]"
-            else:  # roboflow
-                color = (255, 0, 255)  # Magenta for Roboflow
-                label_suffix = " [R]"
+            if detection['source'] == 'coco':
+                color = (0, 255, 0)  # Green for COCO
+                label_suffix = " [C]"
+            else:  # custom
+                color = (255, 0, 255)  # Magenta for Custom
+                label_suffix = " [X]"
             
             # Check if this is the closest obstacle
             is_closest = False
@@ -340,16 +341,7 @@ class DualModelDetector:
         return annotated
     
     def _add_overlay(self, frame, direction, distance, class_name, source):
-        """
-        Add text overlay showing current obstacle information
-        
-        Args:
-            frame: OpenCV frame
-            direction: Obstacle direction
-            distance: Obstacle distance
-            class_name: Type of obstacle
-            source: Detection source (yolo/roboflow)
-        """
+        """Add text overlay showing current obstacle information"""
         # Color based on distance urgency
         if distance == "very_close":
             color = (0, 0, 255)  # Red
@@ -359,7 +351,7 @@ class DualModelDetector:
             color = (0, 255, 0)  # Green
         
         distance_text = distance.upper().replace('_', ' ')
-        source_text = f"[{'YOLO' if source == 'yolo' else 'ROBOFLOW'}]"
+        source_text = f"[{'COCO' if source == 'coco' else 'CUSTOM'}]"
         text = f"{class_name.upper()}: {direction.upper()} - {distance_text} {source_text}"
         
         font = cv2.FONT_HERSHEY_BOLD
@@ -391,21 +383,18 @@ def main():
     parser = argparse.ArgumentParser(
         description='Obstacle Avoidance System for Blind Assistance'
     )
-    parser.add_argument(
-        '--roboflow-key', type=str, default=None,
-        help='Roboflow API key (or set ROBOFLOW_API_KEY env variable)'
-    )
+
     parser.add_argument(
         '--camera', type=int, default=config.CAMERA_INDEX,
         help=f'Camera index (default: {config.CAMERA_INDEX})'
     )
     parser.add_argument(
-        '--roboflow-interval', type=int, default=config.ROBOFLOW_INTERVAL,
-        help=f'Run Roboflow every N frames (default: {config.ROBOFLOW_INTERVAL})'
+        '--custom-model', type=str, default='runs/detect/blind_navigation/obstacles_v1/weights/best.pt',
+        help='Path to your custom trained YOLOv8 model'
     )
     parser.add_argument(
         '--use-yolo-medium', action='store_true',
-        help='Use YOLOv8m (better accuracy, slower) instead of YOLOv8n (faster)'
+        help='Use YOLOv8m (better accuracy, slower) instead of YOLOv8n (faster) for COCO'
     )
     args = parser.parse_args()
     
@@ -413,8 +402,9 @@ def main():
     print("OBSTACLE AVOIDANCE SYSTEM FOR BLIND ASSISTANCE")
     print("=" * 60)
     model_name = "YOLOv8m" if args.use_yolo_medium else "YOLOv8n"
-    print(f"Detection Mode: DUAL MODEL ({model_name} + Roboflow Custom)")
-    print("IMPROVED: Enhanced furniture detection with class-specific thresholds")
+    print(f"Detection Mode: DUAL LOCAL MODELS ({model_name} COCO + Custom)")
+    print(f"Custom Model: {args.custom_model}")
+    print("Enhanced furniture detection with class-specific thresholds")
     
     # Camera setup
     logger.info("[Camera] Initializing camera...")
@@ -441,29 +431,19 @@ def main():
         cap.release()
         return
     
-    # Initialize Roboflow detector
-    logger.info("[Roboflow] Initializing Roboflow custom model...")
-    try:
-        roboflow_detector = RoboflowDetector(api_key=args.roboflow_key)
-        logger.info("[Roboflow] Custom model loaded successfully")
-    except Exception as e:
-        logger.error(f"[Roboflow] Failed to initialize: {e}")
-        print(f"\n[ERROR] Failed to initialize Roboflow: {e}")
-        print("\n=== TROUBLESHOOTING ===")
-        print("1. Check your .env file exists")
-        print("2. Verify ROBOFLOW_API_KEY is set correctly")
-        print("3. Get your API key from: https://app.roboflow.com/settings/api")
-        print("=" * 60)
-        cap.release()
-        return
-    
     # Initialize dual model detector
     logger.info("[Detector] Initializing dual model detector...")
-    detector = DualModelDetector(
-        depth_estimator, roboflow_detector, 
-        roboflow_interval=args.roboflow_interval,
-        use_yolo_medium=args.use_yolo_medium
-    )
+    try:
+        detector = DualModelDetector(
+            depth_estimator,
+            custom_model_path=args.custom_model,
+            use_yolo_medium=args.use_yolo_medium
+        )
+    except Exception as e:
+        logger.error(f"[Detector] Failed to initialize: {e}")
+        print(f"\n[ERROR] Failed to initialize detector: {e}")
+        cap.release()
+        return
 
     # Initialize speech engine
     logger.info("[Speech] Initializing speech engine...")
@@ -487,15 +467,15 @@ def main():
     print("  'd' - Toggle debug info")
     print("=" * 60)
     print("\nColor Guide:")
-    print("  Green [Y]   = YOLOv8 detections")
-    print("  Magenta [R] = Roboflow custom model")
+    print("  Green [C]   = COCO YOLOv8 detections")
+    print("  Magenta [X] = Custom model detections")
     print("  Red         = Closest obstacle")
     print("=" * 60)
-    print(f"\nIMPROVED Features:")
-    print(f"  - Furniture classes: {len(config.FURNITURE_CLASSES)}")
+    print(f"\nFeatures:")
+    print(f"  - COCO furniture classes: {len(config.FURNITURE_CLASSES)}")
     print(f"  - Furniture confidence: {config.YOLO_CONFIDENCE_FURNITURE}")
     print(f"  - Standard confidence: {config.YOLO_CONFIDENCE}")
-    print(f"  - Roboflow interval: {args.roboflow_interval} frames")
+    print(f"  - Custom model confidence: 0.3")
     print(f"  - Furniture depth boost: {config.FURNITURE_DEPTH_BOOST}x")
     print("=" * 60)
     print()
@@ -548,8 +528,8 @@ def main():
                     logger.error("[Processing] Too many consecutive errors, reinitializing...")
                     try:
                         detector = DualModelDetector(
-                            depth_estimator, roboflow_detector,
-                            roboflow_interval=args.roboflow_interval,
+                            depth_estimator,
+                            custom_model_path=args.custom_model,
                             use_yolo_medium=args.use_yolo_medium
                         )
                         consecutive_errors = 0
@@ -612,7 +592,7 @@ def main():
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2
                 )
                 
-                model_text = "YOLOv8m+Roboflow" if args.use_yolo_medium else "YOLOv8n+Roboflow"
+                model_text = f"{'YOLOv8m' if args.use_yolo_medium else 'YOLOv8n'}+Custom"
                 cv2.putText(
                     display_frame, model_text, 
                     (10, display_frame.shape[0] - 40), 
