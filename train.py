@@ -4,7 +4,7 @@ from ultralytics import YOLO
 import torch
 import os
 
-DATA_YAML = 'v2_dataset/data.yaml'
+DATA_YAML = 'My First Project.v3i.yolov8/data.yaml'
 EPOCHS = 50
 BATCH_SIZE = 8          
 IMAGE_SIZE = 640
@@ -79,7 +79,7 @@ def main():
     print("\nRunning validation...")
     metrics = model.val()
 
-    print("\n📊 METRICS")
+    print("\n METRICS")
     print(f"mAP@50:     {metrics.box.map50:.3f}")
     print(f"mAP@50-95:  {metrics.box.map:.3f}")
     print(f"Precision (mean): {np.mean(metrics.box.p):.3f}")
