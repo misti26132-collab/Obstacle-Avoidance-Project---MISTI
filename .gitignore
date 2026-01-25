@@ -1,3 +1,9 @@
 venv/
 .env
 __pycache__/
+tensorrt/
+tmp_cusparself/
+torchvision/
+install_cusperself.sh
+tensorrt_bindings
+tensorrt_libs
