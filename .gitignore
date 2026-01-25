@@ -16,8 +16,8 @@ build/
 tensorrt/
 tmp_cusparself/
 torchvision/
-tensorrt_bindings/
-tensorrt_libs/
+tensorrt_bindings
+tensorrt_libs
 install_cusparself.sh
 *.engine
 *.trt
