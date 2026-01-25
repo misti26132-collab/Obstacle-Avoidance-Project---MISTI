@@ -4,8 +4,8 @@ import numpy as np
 from collections import deque
 import time
 import logging
+import config
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -18,9 +18,18 @@ class DepthEstimator:
             self.device = device
         
         logger.info(f"[DepthEstimator] Using device: {self.device}")
+        
+        self.use_tensorrt = False
+        if torch.cuda.is_available():
+            try:
+                self.use_tensorrt = True
+                logger.info("[DepthEstimator] TensorRT available - will use optimizations")
+            except ImportError:
+                logger.info("[DepthEstimator] TensorRT not available - using standard CUDA")
 
         self.midas = None
         self.transform = None
+        self.use_fp16 = config.USE_HALF_PRECISION and torch.cuda.is_available()
         
         for attempt in range(max_retries):
             try:
@@ -28,28 +37,46 @@ class DepthEstimator:
                     f"[DepthEstimator] Loading MiDaS model "
                     f"(attempt {attempt + 1}/{max_retries})..."
                 )
+                
+                # Use MiDaS_small for Jetson (faster, less memory)
                 self.midas = torch.hub.load(
-                    "intel-isl/MiDaS", "MiDaS_small", trust_repo=True
+                    "intel-isl/MiDaS", "MiDaS_small", 
+                    trust_repo=True,
+                    skip_validation=True  # Faster loading
                 )
                 self.midas.to(self.device)
                 self.midas.eval()
                 
+                # Jetson optimization: Convert to FP16 if enabled
+                if self.use_fp16:
+                    logger.info("[DepthEstimator] Converting model to FP16...")
+                    self.midas = self.midas.half()
+                
                 logger.info("[DepthEstimator] Loading transforms...")
-                transforms = torch.hub.load("intel-isl/MiDaS", "transforms", trust_repo=True)
+                transforms = torch.hub.load(
+                    "intel-isl/MiDaS", "transforms", 
+                    trust_repo=True,
+                    skip_validation=True
+                )
                 self.transform = transforms.small_transform
                 
                 logger.info("[DepthEstimator] MiDaS model loaded successfully")
                 
-                # FIXED: Verify model loaded correctly
                 if self.midas is None or self.transform is None:
                     raise RuntimeError("MiDaS model or transforms failed to load")
                 
-                # FIXED: Test model with dummy input
+                # Test model with dummy input
                 try:
                     dummy = torch.randn(1, 3, 256, 256).to(self.device)
+                    if self.use_fp16:
+                        dummy = dummy.half()
+                    
                     with torch.no_grad():
                         _ = self.midas(dummy)
+                    
                     logger.info("[DepthEstimator] Model verification successful")
+                    if self.use_fp16:
+                        logger.info("[DepthEstimator] FP16 mode enabled for faster inference")
                 except Exception as e:
                     raise RuntimeError(f"Model loaded but failed verification: {e}")
                 
@@ -61,7 +88,7 @@ class DepthEstimator:
                     f"{type(e).__name__}: {str(e)}"
                 )
                 if attempt < max_retries - 1:
-                    wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                    wait_time = 2 ** attempt
                     logger.info(f"[DepthEstimator] Retrying in {wait_time} seconds...")
                     time.sleep(wait_time)
                 else:
@@ -72,25 +99,22 @@ class DepthEstimator:
                         f"Check your internet connection and try again."
                     )
         
-        # Adaptive scaling components to prevent depth inconsistencies
-        self.scale_history = deque(maxlen=30)  # Track last 30 frames
-        self.min_history = deque(maxlen=30)
+        # Adaptive scaling components
+        self.scale_history = deque(maxlen=config.DEPTH_HISTORY_SIZE)
+        self.min_history = deque(maxlen=config.DEPTH_HISTORY_SIZE)
         self.initialized = False
+        
+        # Jetson optimization: Pre-allocate CUDA memory for common sizes
+        if torch.cuda.is_available():
+            logger.info("[DepthEstimator] Pre-warming CUDA...")
+            dummy_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+            _ = self.estimate(dummy_frame)
+            logger.info("[DepthEstimator] CUDA warm-up complete")
         
         logger.info("[DepthEstimator] Initialization complete")
 
+    @torch.amp.autocast('cuda', enabled=True)  # Automatic mixed precision
     def estimate(self, frame):
-        """
-        Estimate depth with ADAPTIVE scaling to prevent inconsistencies
-        
-        Args:
-            frame: OpenCV BGR frame
-            
-        Returns:
-            depth_map: Normalized depth map where:
-                      - Higher values (closer to 1.0) = CLOSER objects
-                      - Lower values (closer to 0.0) = FARTHER objects
-        """
         if frame is None or frame.size == 0:
             raise ValueError("Invalid frame provided to depth estimator")
 
@@ -99,10 +123,16 @@ class DepthEstimator:
         
         # Prepare input
         input_batch = self.transform(img).to(self.device)
+        
+        # Convert to FP16 if enabled
+        if self.use_fp16:
+            input_batch = input_batch.half()
 
-        # Run inference
+        # Run inference with torch.no_grad() to save memory
         with torch.no_grad():
             prediction = self.midas(input_batch)
+            
+            # Resize prediction
             prediction = torch.nn.functional.interpolate(
                 prediction.unsqueeze(1),
                 size=img.shape[:2],
@@ -110,40 +140,36 @@ class DepthEstimator:
                 align_corners=False,
             ).squeeze()
 
-        depth_map_raw = prediction.cpu().numpy()
+        # Convert to numpy (handle FP16)
+        if self.use_fp16:
+            depth_map_raw = prediction.float().cpu().numpy()
+        else:
+            depth_map_raw = prediction.cpu().numpy()
 
-        # ==========================================================
-        # ADAPTIVE SCALING - Fixes inconsistent depth detection
-        # ==========================================================
+        # Adaptive scaling
+        p5 = np.percentile(depth_map_raw, config.DEPTH_MIN_PERCENTILE)
+        p95 = np.percentile(depth_map_raw, config.DEPTH_MAX_PERCENTILE)
         
-        # Calculate percentiles for this frame
-        p5 = np.percentile(depth_map_raw, 5)   # Near objects
-        p95 = np.percentile(depth_map_raw, 95) # Far objects
-        
-        # Store in history
         self.min_history.append(p5)
         self.scale_history.append(p95)
         
-        # Use smoothed values (prevents jumping between frames)
         if len(self.scale_history) >= 10:
             smooth_min = np.median(self.min_history)
             smooth_max = np.median(self.scale_history)
             self.initialized = True
         else:
-            # Initial frames - use current values
             smooth_min = p5
             smooth_max = p95
         
-        # Normalize to 0-1 range with adaptive scaling
         depth_range = smooth_max - smooth_min
-        if depth_range < 1e-6:  # Prevent division by zero
+        if depth_range < 1e-6:
             logger.warning("[DepthEstimator] Uniform depth detected, returning zeros")
             depth_map = np.zeros_like(depth_map_raw)
         else:
             depth_map = (depth_map_raw - smooth_min) / depth_range
             depth_map = np.clip(depth_map, 0, 1)
         
-        # Invert so that: 1.0 = CLOSE (high disparity), 0.0 = FAR (low disparity)
+        # Invert: 1.0 = CLOSE, 0.0 = FAR
         depth_map = 1.0 - depth_map
 
         return depth_map
@@ -151,11 +177,8 @@ class DepthEstimator:
     def estimate_with_visualization(self, frame):
         depth_map = self.estimate(frame)
         
-        # Visualization: Close=Bright, Far=Dark
-        vis_raw = depth_map * 255  # High values (close) = bright
+        vis_raw = depth_map * 255
         depth_vis = vis_raw.astype(np.uint8)
-        
-        # Apply MAGMA colormap for better visibility
         depth_colored = cv2.applyColorMap(depth_vis, cv2.COLORMAP_MAGMA)
         
         return depth_map, depth_colored
@@ -165,43 +188,57 @@ class DepthEstimator:
         x = int(x)
         y = int(y)
         
-        # Calculate region bounds
         x1 = max(0, x - radius)
         y1 = max(0, y - radius)
         x2 = min(w, x + radius)
         y2 = min(h, y + radius)
         
-        # Extract region and calculate mean
         region = depth_map[y1:y2, x1:x2]
         return float(region.mean()) if region.size > 0 else 0.5
-    
-    def visualize_depth(self, depth_map_normalized):
-        depth_vis = (depth_map_normalized * 255).astype(np.uint8)
-        colored_depth = cv2.applyColorMap(depth_vis, cv2.COLORMAP_JET)
-        return colored_depth
 
 
 def test_depth_estimator():
     print("=" * 60)
-    print("DEPTH ESTIMATOR TEST")
+    print("JETSON DEPTH ESTIMATOR TEST")
     print("=" * 60)
     
-    # Initialize
+    # Check CUDA
+    if torch.cuda.is_available():
+        print(f"CUDA Device: {torch.cuda.get_device_name(0)}")
+        print(f"CUDA Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+    else:
+        print("WARNING: CUDA not available, using CPU (slow)")
+    
+    print("=" * 60)
+    
     try:
         estimator = DepthEstimator()
     except RuntimeError as e:
         print(f"\n[ERROR] {e}")
         return
     
-    # Open webcam
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        print("[ERROR] Could not open webcam")
-        return
+    # Import camera utils
+    try:
+        from camera_utils import JetsonCamera
+        cap = JetsonCamera(
+            camera_id=config.CAMERA_INDEX,
+            width=config.CAMERA_WIDTH,
+            height=config.CAMERA_HEIGHT,
+            fps=config.CAMERA_FPS
+        )
+    except ImportError:
+        print("[WARNING] camera_utils not found, using basic OpenCV")
+        cap = cv2.VideoCapture(0)
+        if not cap.isOpened():
+            print("[ERROR] Could not open camera")
+            return
     
     print("\n[Camera] Ready")
     print("Controls: 'q' to quit")
     print("=" * 60)
+    
+    fps_counter = 0
+    fps_start = time.time()
     
     try:
         while True:
@@ -210,11 +247,25 @@ def test_depth_estimator():
                 continue
             
             # Estimate depth
+            start = time.time()
             depth_map, depth_vis = estimator.estimate_with_visualization(frame)
+            inference_time = (time.time() - start) * 1000
             
-            # Display side by side
+            # Calculate FPS
+            fps_counter += 1
+            if fps_counter % 30 == 0:
+                fps = 30 / (time.time() - fps_start)
+                print(f"[Performance] FPS: {fps:.1f} | Inference: {inference_time:.1f}ms")
+                fps_start = time.time()
+            
+            # Display
+            cv2.putText(
+                depth_vis, f"FPS: {fps_counter % 100}", (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2
+            )
+            
             display = np.hstack([frame, depth_vis])
-            cv2.imshow("Camera | Depth", display)
+            cv2.imshow("Camera | Depth (Jetson)", display)
             
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
@@ -223,7 +274,8 @@ def test_depth_estimator():
         print("\n[System] Interrupted")
     
     finally:
-        cap.release()
+        if hasattr(cap, 'release'):
+            cap.release()
         cv2.destroyAllWindows()
         print("[Done]")
 

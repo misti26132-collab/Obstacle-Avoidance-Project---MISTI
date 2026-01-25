@@ -7,9 +7,20 @@ from depth import DepthEstimator
 from Speech import SpeechEngine
 from ultralytics import YOLO
 from health_check import SystemHealthMonitor
+from camera_utils import JetsonCamera
 import config
+import torch
 
-# Configure logging
+print("=" * 60)
+print("GPU STATUS CHECK")
+print("=" * 60)
+print(f"CUDA Available: {torch.cuda.is_available()}")
+if torch.cuda.is_available():
+    print(f"CUDA Device: {torch.cuda.get_device_name(0)}")
+    print(f"Current Device: {torch.cuda.current_device()}")
+    print(f"Device Count: {torch.cuda.device_count()}")
+print("=" * 60)
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -18,7 +29,6 @@ logger = logging.getLogger(__name__)
 
 
 def calculate_iou(box1, box2):
-    # Convert to lists if numpy arrays
     if hasattr(box1, 'tolist'):
         box1 = box1.tolist()
     if hasattr(box2, 'tolist'):
@@ -27,7 +37,6 @@ def calculate_iou(box1, box2):
     x1_min, y1_min, x1_max, y1_max = box1[:4]
     x2_min, y2_min, x2_max, y2_max = box2[:4]
     
-    # Intersection
     xi_min = max(x1_min, x2_min)
     yi_min = max(y1_min, y2_min)
     xi_max = min(x1_max, x2_max)
@@ -35,7 +44,6 @@ def calculate_iou(box1, box2):
     
     inter_area = max(0, xi_max - xi_min) * max(0, yi_max - yi_min)
     
-    # Union
     box1_area = (x1_max - x1_min) * (y1_max - y1_min)
     box2_area = (x2_max - x2_min) * (y2_max - y2_min)
     union_area = box1_area + box2_area - inter_area
@@ -46,17 +54,19 @@ def calculate_iou(box1, box2):
 class DualModelDetector:
     
     def __init__(self, depth_estimator, custom_model_path='runs/detect/blind_navigation/obstacles_v1/weights/best.pt', use_yolo_medium=False):
-        # Load COCO pretrained model for general objects
         model_name = 'yolov8m.pt' if use_yolo_medium else 'yolov8n.pt'
         logger.info(f"[DualModel] Loading COCO model: {model_name}...")
         logger.info("[DualModel] (First run will download model, please wait...)")
-        self.yolo_coco = YOLO(model_name)
-        logger.info(f"[DualModel] {model_name} loaded successfully")
         
-        # Load your custom trained model
+        device = 'cuda:0' if config.CUDA_DEVICE == 0 else 'cpu'
+        self.yolo_coco = YOLO(model_name)
+        self.yolo_coco.to(device)
+        logger.info(f"[DualModel] {model_name} loaded on {device}")
+        
         logger.info(f"[DualModel] Loading custom trained model: {custom_model_path}...")
         try:
             self.yolo_custom = YOLO(custom_model_path)
+            self.yolo_custom.to(device)
             logger.info("[DualModel] Custom model loaded successfully")
             logger.info(f"[DualModel] Custom classes: {list(self.yolo_custom.names.values())}")
         except Exception as e:
@@ -68,7 +78,6 @@ class DualModelDetector:
         self.frame_width = None
         self.frame_height = None
         
-        # COCO classes relevant for obstacle avoidance
         self.coco_obstacle_classes = [
             'person', 'bicycle', 'car', 'motorcycle', 'bus', 'truck',
             'chair', 'couch', 'potted plant', 'bed', 'dining table',
@@ -80,37 +89,30 @@ class DualModelDetector:
         logger.info(f"[DualModel] Initialized: COCO ({model_name}) + Custom Model")
         logger.info(f"[DualModel] Monitoring {len(self.coco_obstacle_classes)} COCO obstacle classes")
         logger.info(f"[DualModel] Custom model has {len(self.yolo_custom.names)} classes")
-        logger.info(f"[DualModel] {len(config.FURNITURE_CLASSES)} furniture classes use {config.YOLO_CONFIDENCE_FURNITURE} confidence")
     
     def process(self, frame):
-        """
-        Process frame with both detection models and depth estimation
-        
-        Args:
-            frame: OpenCV BGR frame
-            
-        Returns:
-            tuple: (annotated_frame, direction, distance, obstacle_class)
-        """
         self.frame_height, self.frame_width = frame.shape[:2]
         self.frame_count += 1
         
-        # Get depth map
         try:
             depth_map, depth_vis = self.depth_estimator.estimate_with_visualization(frame)
         except Exception as e:
             logger.error(f"[DualModel] Depth estimation error: {e}")
             return frame, None, None, None
         
-        # 1. Run COCO YOLOv8 (for general objects)
+        # JETSON: Run inference with explicit settings
         try:
-            yolo_results = self.yolo_coco(frame, conf=config.YOLO_CONFIDENCE_FURNITURE, verbose=False)
+            yolo_results = self.yolo_coco(
+                frame, 
+                conf=config.YOLO_CONFIDENCE_FURNITURE,
+                verbose=False,
+                device=config.CUDA_DEVICE
+            )
             yolo_boxes = yolo_results[0].boxes
         except Exception as e:
             logger.error(f"[DualModel] YOLO COCO error: {e}")
             yolo_boxes = []
         
-        # Filter YOLO COCO detections with class-specific confidence thresholds
         yolo_detections = []
         for box in yolo_boxes:
             class_id = int(box.cls[0])
@@ -118,7 +120,6 @@ class DualModelDetector:
             confidence = float(box.conf[0])
             
             if class_name in self.coco_obstacle_classes:
-                # Apply different thresholds for furniture vs other objects
                 if class_name in config.FURNITURE_CLASSES:
                     min_conf = config.YOLO_CONFIDENCE_FURNITURE
                 else:
@@ -132,15 +133,18 @@ class DualModelDetector:
                         'source': 'coco'
                     })
         
-        # 2. Run Custom YOLOv8 (your trained model)
         try:
-            custom_results = self.yolo_custom(frame, conf=0.3, verbose=False)
+            custom_results = self.yolo_custom(
+                frame,
+                conf=0.3,
+                verbose=False,
+                device=config.CUDA_DEVICE
+            )
             custom_boxes = custom_results[0].boxes
         except Exception as e:
             logger.error(f"[DualModel] Custom YOLO error: {e}")
             custom_boxes = []
         
-        # Parse custom model detections
         custom_detections = []
         for box in custom_boxes:
             class_id = int(box.cls[0])
@@ -154,10 +158,8 @@ class DualModelDetector:
                 'source': 'custom'
             })
         
-        # Combine detections (remove duplicates based on IoU)
         all_detections = self._merge_detections(yolo_detections, custom_detections)
         
-        # Log detection statistics every 100 frames
         if self.frame_count % 100 == 0 and len(all_detections) > 0:
             coco_count = len(yolo_detections)
             custom_count = len(custom_detections)
@@ -166,13 +168,9 @@ class DualModelDetector:
         if len(all_detections) == 0:
             return frame, None, None, None
         
-        # Find closest obstacle
         direction, distance, closest = self._analyze_obstacles(all_detections, depth_map)
-        
-        # Draw all detections
         annotated_frame = self._draw_detections(frame, all_detections, closest)
         
-        # Add overlay
         if direction and distance and closest:
             self._add_overlay(
                 annotated_frame, direction, distance, 
@@ -183,10 +181,8 @@ class DualModelDetector:
         return annotated_frame, direction, distance, obstacle_class
     
     def _merge_detections(self, coco_dets, custom_dets):
-        """Merge COCO and custom detections, removing duplicates"""
-        all_detections = list(coco_dets)  # Start with COCO
+        all_detections = list(coco_dets)
         
-        # Add custom detections if they don't overlap with COCO
         for custom_det in custom_dets:
             is_duplicate = False
             custom_box = custom_det['box']
@@ -205,14 +201,12 @@ class DualModelDetector:
         return all_detections
     
     def _analyze_obstacles(self, detections, depth_map):
-        """Find the closest obstacle and determine its direction/distance"""
         closest_obstacle = None
-        closest_depth = 0.0  # Higher depth = closer
+        closest_depth = 0.0
         
         for detection in detections:
             box = detection['box']
             
-            # Handle both list and numpy array formats
             if hasattr(box, 'tolist'):
                 x1, y1, x2, y2 = box.tolist()[:4]
             else:
@@ -221,21 +215,16 @@ class DualModelDetector:
             center_x = (x1 + x2) / 2
             center_y = (y1 + y2) / 2
             
-            # Get depth at center
             depth_val = self.depth_estimator.get_distance_at_point(
                 depth_map, center_x, center_y, radius=10
             )
             
-            # Smart furniture depth priority
             if detection['class'] in config.FURNITURE_CLASSES:
                 if depth_val < 0.3:
-                    # Far furniture: additive boost
                     depth_val = min(depth_val + config.FURNITURE_DEPTH_ADDITIVE, 1.0)
                 else:
-                    # Close furniture: multiplicative boost
                     depth_val = min(depth_val * config.FURNITURE_DEPTH_BOOST, 1.0)
             
-            # Higher depth = closer (due to inversion in depth estimator)
             if depth_val > closest_depth:
                 closest_depth = depth_val
                 closest_obstacle = {
@@ -251,11 +240,9 @@ class DualModelDetector:
         if closest_obstacle is None:
             return None, None, None
         
-        # Determine direction based on horizontal position
         center_x = closest_obstacle['center_x']
         frame_center = self.frame_width / 2
         
-        # Define boundaries using config
         left_boundary = frame_center * config.LEFT_BOUNDARY
         right_boundary = frame_center * config.RIGHT_BOUNDARY
         
@@ -266,7 +253,6 @@ class DualModelDetector:
         else:
             direction = "center"
         
-        # Determine distance based on depth using config thresholds
         if closest_depth > config.VERY_CLOSE_THRESHOLD:
             distance = "very_close"
         elif closest_depth > config.CLOSE_THRESHOLD:
@@ -283,27 +269,23 @@ class DualModelDetector:
         return direction, distance, closest_obstacle
     
     def _draw_detections(self, frame, detections, closest):
-        """Draw bounding boxes on frame"""
         annotated = frame.copy()
         
         for detection in detections:
             box = detection['box']
             
-            # Handle both list and numpy array formats
             if hasattr(box, 'tolist'):
                 x1, y1, x2, y2 = map(int, box.tolist()[:4])
             else:
                 x1, y1, x2, y2 = map(int, box[:4])
             
-            # Color based on source
             if detection['source'] == 'coco':
-                color = (0, 255, 0)  # Green for COCO
+                color = (0, 255, 0)
                 label_suffix = " [C]"
-            else:  # custom
-                color = (255, 0, 255)  # Magenta for Custom
+            else:
+                color = (255, 0, 255)
                 label_suffix = " [X]"
             
-            # Check if this is the closest obstacle
             is_closest = False
             if closest:
                 closest_box = closest['box']
@@ -312,15 +294,13 @@ class DualModelDetector:
                     is_closest = True
             
             if is_closest:
-                color = (0, 0, 255)  # Red for closest
+                color = (0, 0, 255)
                 thickness = 4
             else:
                 thickness = 2
             
-            # Draw box
             cv2.rectangle(annotated, (x1, y1), (x2, y2), color, thickness)
             
-            # Draw label
             label = f"{detection['class']} {detection['confidence']:.2f}{label_suffix}"
             font = cv2.FONT_HERSHEY_SIMPLEX
             font_scale = 0.5
@@ -341,14 +321,12 @@ class DualModelDetector:
         return annotated
     
     def _add_overlay(self, frame, direction, distance, class_name, source):
-        """Add text overlay showing current obstacle information"""
-        # Color based on distance urgency
         if distance == "very_close":
-            color = (0, 0, 255)  # Red
+            color = (0, 0, 255)
         elif distance == "close":
-            color = (0, 165, 255)  # Orange
+            color = (0, 165, 255)
         else:
-            color = (0, 255, 0)  # Green
+            color = (0, 255, 0)
         
         distance_text = distance.upper().replace('_', ' ')
         source_text = f"[{'COCO' if source == 'coco' else 'CUSTOM'}]"
@@ -381,7 +359,7 @@ class DualModelDetector:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Obstacle Avoidance System for Blind Assistance'
+        description='Obstacle Avoidance System for Blind Assistance - Jetson Optimized'
     )
 
     parser.add_argument(
@@ -399,29 +377,35 @@ def main():
     args = parser.parse_args()
     
     print("=" * 60)
-    print("OBSTACLE AVOIDANCE SYSTEM FOR BLIND ASSISTANCE")
+    print("JETSON ORIN NANO - OBSTACLE AVOIDANCE SYSTEM")
     print("=" * 60)
     model_name = "YOLOv8m" if args.use_yolo_medium else "YOLOv8n"
     print(f"Detection Mode: DUAL LOCAL MODELS ({model_name} COCO + Custom)")
     print(f"Custom Model: {args.custom_model}")
-    print("Enhanced furniture detection with class-specific thresholds")
     
-    # Camera setup
-    logger.info("[Camera] Initializing camera...")
-    cap = cv2.VideoCapture(0, cv2.CAP_ANY)   
-
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    cap.set(cv2.CAP_PROP_FPS, 30)
-
-    if not cap.isOpened():
-        logger.error(f"[Camera] Could not open camera {args.camera}")
-        print(f"\n[ERROR] Could not open camera {args.camera}. Please check connection.")
+    logger.info("[Camera] Initializing Jetson camera...")
+    try:
+        cap = JetsonCamera(
+            camera_id=config.CAMERA_INDEX, 
+            width=config.CAMERA_WIDTH, 
+            height=config.CAMERA_HEIGHT, 
+            fps=config.CAMERA_FPS
+        )
+        
+        camera_info = cap.get_info()
+        logger.info(f"[Camera] {camera_info}")
+        print(f"\n[Camera] Initialized: {camera_info['backend']}")
+        print(f"[Camera] Resolution: {camera_info['width']}x{camera_info['height']} @ {camera_info['fps']}fps")
+        
+    except Exception as e:
+        logger.error(f"[Camera] Initialization failed: {e}")
+        print(f"\n[ERROR] Camera initialization failed: {e}")
+        print("\nTroubleshooting:")
+        print("1. Check camera connection (CSI ribbon or USB)")
+        print("2. For USB cameras: ls /dev/video*")
+        print("3. Check permissions: sudo usermod -aG video $USER")
+        print("4. Adjust config.py settings (USE_GSTREAMER, CAMERA_INDEX)")
         return
-    
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.CAMERA_WIDTH)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.CAMERA_HEIGHT)
-    cap.set(cv2.CAP_PROP_FPS, config.CAMERA_FPS)
     
     logger.info("[Camera] Camera initialized successfully")
     
@@ -459,7 +443,6 @@ def main():
         cap.release()
         return
     
-    # Initialize health monitor
     health_monitor = SystemHealthMonitor()
     
     print("\n" + "=" * 60)
@@ -470,18 +453,6 @@ def main():
     print("  's' - Toggle split view (camera + depth)")
     print("  'd' - Toggle debug info")
     print("=" * 60)
-    print("\nColor Guide:")
-    print("  Green [C]   = COCO YOLOv8 detections")
-    print("  Magenta [X] = Custom model detections")
-    print("  Red         = Closest obstacle")
-    print("=" * 60)
-    print(f"\nFeatures:")
-    print(f"  - COCO furniture classes: {len(config.FURNITURE_CLASSES)}")
-    print(f"  - Furniture confidence: {config.YOLO_CONFIDENCE_FURNITURE}")
-    print(f"  - Standard confidence: {config.YOLO_CONFIDENCE}")
-    print(f"  - Custom model confidence: 0.3")
-    print(f"  - Furniture depth boost: {config.FURNITURE_DEPTH_BOOST}x")
-    print("=" * 60)
     print()
     
     # Warm-up camera
@@ -489,16 +460,13 @@ def main():
     for _ in range(5):
         cap.read()
     
-    # Display settings
     show_split_view = False
     show_debug = True
     
-    # Performance monitoring
     fps_counter = 0
     fps_start = time.time()
     fps_display = 0.0
     
-    # Error recovery tracking
     consecutive_errors = 0
     max_consecutive_errors = config.MAX_CONSECUTIVE_ERRORS
     
@@ -514,7 +482,6 @@ def main():
             
             health_monitor.update_camera()
 
-            # Process frame
             try:
                 annotated_frame, direction, distance, obstacle_class = detector.process(frame)
                 
@@ -542,11 +509,9 @@ def main():
                         logger.critical(f"[Processing] Reinitialization failed: {reinit_error}")
                         break
 
-            # Audio feedback
             if direction is not None and distance is not None:
                 speaker.speak(direction, distance, obstacle_class)
 
-            # Calculate FPS
             fps_counter += 1
             if fps_counter % 30 == 0:
                 elapsed = time.time() - fps_start
@@ -562,7 +527,6 @@ def main():
                 
                 fps_start = time.time()
 
-            # Create display frame
             if show_split_view:
                 try:
                     depth_map, depth_vis = depth_estimator.estimate_with_visualization(frame)
@@ -588,24 +552,15 @@ def main():
             else:
                 display_frame = annotated_frame
 
-            # Add overlays
             if show_debug:
                 cv2.putText(
                     display_frame, f"FPS: {fps_display:.1f}", 
                     (10, display_frame.shape[0] - 10), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2
                 )
-                
-                model_text = f"{'YOLOv8m' if args.use_yolo_medium else 'YOLOv8n'}+Custom"
-                cv2.putText(
-                    display_frame, model_text, 
-                    (10, display_frame.shape[0] - 40), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1
-                )
 
             cv2.imshow("Obstacle Avoidance System", display_frame)
 
-            # Handle keyboard
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):
                 logger.info("[System] Shutting down...")
