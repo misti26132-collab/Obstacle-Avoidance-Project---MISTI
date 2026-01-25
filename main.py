@@ -86,78 +86,99 @@ class DualModelDetector:
         
         self.frame_count = 0
         
+        self.cached_depth_map = None
+        self.cached_yolo_coco = []
+        self.cached_yolo_custom = []
+        
         logger.info(f"[DualModel] Initialized: COCO ({model_name}) + Custom Model")
         logger.info(f"[DualModel] Monitoring {len(self.coco_obstacle_classes)} COCO obstacle classes")
         logger.info(f"[DualModel] Custom model has {len(self.yolo_custom.names)} classes")
+        logger.info(f"[DualModel] Frame skipping - Depth: every {config.DEPTH_FRAME_SKIP}, COCO: every {config.YOLO_COCO_FRAME_SKIP}, Custom: every {config.YOLO_CUSTOM_FRAME_SKIP}")
     
     def process(self, frame):
         self.frame_height, self.frame_width = frame.shape[:2]
         self.frame_count += 1
         
-        try:
-            depth_map, depth_vis = self.depth_estimator.estimate_with_visualization(frame)
-        except Exception as e:
-            logger.error(f"[DualModel] Depth estimation error: {e}")
-            return frame, None, None, None
+        if self.frame_count % config.DEPTH_FRAME_SKIP == 0:
+            try:
+                depth_map, depth_vis = self.depth_estimator.estimate_with_visualization(frame)
+                self.cached_depth_map = depth_map
+            except Exception as e:
+                logger.error(f"[DualModel] Depth estimation error: {e}")
+                if self.cached_depth_map is None:
+                    return frame, None, None, None
+        else:
+            depth_map = self.cached_depth_map
+            if depth_map is None:
+                return frame, None, None, None
         
-        # JETSON: Run inference with explicit settings
-        try:
-            yolo_results = self.yolo_coco(
-                frame, 
-                conf=config.YOLO_CONFIDENCE_FURNITURE,
-                verbose=False,
-                device=config.CUDA_DEVICE
-            )
-            yolo_boxes = yolo_results[0].boxes
-        except Exception as e:
-            logger.error(f"[DualModel] YOLO COCO error: {e}")
-            yolo_boxes = []
-        
-        yolo_detections = []
-        for box in yolo_boxes:
-            class_id = int(box.cls[0])
-            class_name = self.yolo_coco.names[class_id]
-            confidence = float(box.conf[0])
-            
-            if class_name in self.coco_obstacle_classes:
-                if class_name in config.FURNITURE_CLASSES:
-                    min_conf = config.YOLO_CONFIDENCE_FURNITURE
-                else:
-                    min_conf = config.YOLO_CONFIDENCE
+        if self.frame_count % config.YOLO_COCO_FRAME_SKIP == 0:
+            try:
+                yolo_results = self.yolo_coco(
+                    frame, 
+                    conf=config.YOLO_CONFIDENCE_FURNITURE,
+                    verbose=False,
+                    device=config.CUDA_DEVICE
+                )
+                yolo_boxes = yolo_results[0].boxes
                 
-                if confidence >= min_conf:
-                    yolo_detections.append({
+                yolo_detections = []
+                for box in yolo_boxes:
+                    class_id = int(box.cls[0])
+                    class_name = self.yolo_coco.names[class_id]
+                    confidence = float(box.conf[0])
+                    
+                    if class_name in self.coco_obstacle_classes:
+                        if class_name in config.FURNITURE_CLASSES:
+                            min_conf = config.YOLO_CONFIDENCE_FURNITURE
+                        else:
+                            min_conf = config.YOLO_CONFIDENCE
+                        
+                        if confidence >= min_conf:
+                            yolo_detections.append({
+                                'box': box.xyxy[0].cpu().numpy(),
+                                'class': class_name,
+                                'confidence': confidence,
+                                'source': 'coco'
+                            })
+                
+                self.cached_yolo_coco = yolo_detections
+            except Exception as e:
+                logger.error(f"[DualModel] YOLO COCO error: {e}")
+        else:
+            yolo_detections = self.cached_yolo_coco
+        
+        # Custom YOLO detection with frame skipping
+        if self.frame_count % config.YOLO_CUSTOM_FRAME_SKIP == 0:
+            try:
+                custom_results = self.yolo_custom(
+                    frame,
+                    conf=0.3,
+                    verbose=False,
+                    device=config.CUDA_DEVICE
+                )
+                custom_boxes = custom_results[0].boxes
+                
+                custom_detections = []
+                for box in custom_boxes:
+                    class_id = int(box.cls[0])
+                    class_name = self.yolo_custom.names[class_id]
+                    confidence = float(box.conf[0])
+                    
+                    custom_detections.append({
                         'box': box.xyxy[0].cpu().numpy(),
                         'class': class_name,
                         'confidence': confidence,
-                        'source': 'coco'
+                        'source': 'custom'
                     })
+                
+                self.cached_yolo_custom = custom_detections
+            except Exception as e:
+                logger.error(f"[DualModel] Custom YOLO error: {e}")
+        else:
+            custom_detections = self.cached_yolo_custom
         
-        try:
-            custom_results = self.yolo_custom(
-                frame,
-                conf=0.3,
-                verbose=False,
-                device=config.CUDA_DEVICE
-            )
-            custom_boxes = custom_results[0].boxes
-        except Exception as e:
-            logger.error(f"[DualModel] Custom YOLO error: {e}")
-            custom_boxes = []
-        
-        custom_detections = []
-        for box in custom_boxes:
-            class_id = int(box.cls[0])
-            class_name = self.yolo_custom.names[class_id]
-            confidence = float(box.conf[0])
-            
-            custom_detections.append({
-                'box': box.xyxy[0].cpu().numpy(),
-                'class': class_name,
-                'confidence': confidence,
-                'source': 'custom'
-            })
-        
+        # Merge detections
         all_detections = self._merge_detections(yolo_detections, custom_detections)
         
         if self.frame_count % 100 == 0 and len(all_detections) > 0:
@@ -332,7 +353,7 @@ class DualModelDetector:
         source_text = f"[{'COCO' if source == 'coco' else 'CUSTOM'}]"
         text = f"{class_name.upper()}: {direction.upper()} - {distance_text} {source_text}"
         
-        font = cv2.FONT_HERSHEY_BOLD
+        font = cv2.FONT_HERSHEY_SIMPLEX
         font_scale = 0.8
         thickness = 2
         
@@ -382,6 +403,10 @@ def main():
     model_name = "YOLOv8m" if args.use_yolo_medium else "YOLOv8n"
     print(f"Detection Mode: DUAL LOCAL MODELS ({model_name} COCO + Custom)")
     print(f"Custom Model: {args.custom_model}")
+    print(f"Performance Mode: Frame Skipping Enabled")
+    print(f"  - Depth: Every {config.DEPTH_FRAME_SKIP} frames")
+    print(f"  - COCO YOLO: Every {config.YOLO_COCO_FRAME_SKIP} frames")
+    print(f"  - Custom YOLO: Every {config.YOLO_CUSTOM_FRAME_SKIP} frames")
     
     logger.info("[Camera] Initializing Jetson camera...")
     try:
@@ -455,7 +480,6 @@ def main():
     print("=" * 60)
     print()
     
-    # Warm-up camera
     logger.info("[System] Warming up camera...")
     for _ in range(5):
         cap.read()
@@ -469,6 +493,8 @@ def main():
     
     consecutive_errors = 0
     max_consecutive_errors = config.MAX_CONSECUTIVE_ERRORS
+    
+    cached_depth_vis = None
     
     # Main loop
     try:
@@ -528,26 +554,38 @@ def main():
                 fps_start = time.time()
 
             if show_split_view:
-                try:
-                    depth_map, depth_vis = depth_estimator.estimate_with_visualization(frame)
-                    
-                    display_height = 480
-                    display_width = 640
-                    frame_resized = cv2.resize(annotated_frame, (display_width, display_height))
-                    depth_resized = cv2.resize(depth_vis, (display_width, display_height))
-                    
-                    cv2.putText(
-                        frame_resized, "CAMERA", (10, 30), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2
-                    )
-                    cv2.putText(
-                        depth_resized, "DEPTH", (10, 30), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2
-                    )
-                    
-                    display_frame = np.hstack([frame_resized, depth_resized])
-                except Exception as e:
-                    logger.error(f"[Display] Split view error: {e}")
+                # Only regenerate depth visualization when depth is actually calculated
+                if fps_counter % config.DEPTH_FRAME_SKIP == 0:
+                    try:
+                        depth_map = detector.cached_depth_map
+                        if depth_map is not None:
+                            vis_raw = depth_map * 255
+                            depth_vis = vis_raw.astype(np.uint8)
+                            cached_depth_vis = cv2.applyColorMap(depth_vis, cv2.COLORMAP_MAGMA)
+                    except Exception as e:
+                        logger.error(f"[Display] Depth vis error: {e}")
+                
+                if cached_depth_vis is not None:
+                    try:
+                        display_height = 480
+                        display_width = 640
+                        frame_resized = cv2.resize(annotated_frame, (display_width, display_height))
+                        depth_resized = cv2.resize(cached_depth_vis, (display_width, display_height))
+                        
+                        cv2.putText(
+                            frame_resized, "CAMERA", (10, 30), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2
+                        )
+                        cv2.putText(
+                            depth_resized, "DEPTH", (10, 30), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2
+                        )
+                        
+                        display_frame = np.hstack([frame_resized, depth_resized])
+                    except Exception as e:
+                        logger.error(f"[Display] Split view error: {e}")
+                        display_frame = annotated_frame
+                else:
                     display_frame = annotated_frame
             else:
                 display_frame = annotated_frame
