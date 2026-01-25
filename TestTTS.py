@@ -2,7 +2,7 @@ import cv2
 import time
 from Speech import SpeechEngine
 
-cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture('/dev/video0')
 
 if not cap.isOpened():
     print("ERROR: Camera not available.")
@@ -64,9 +64,6 @@ except KeyboardInterrupt:
     print("\n[System] Interrupted by user")
 
 finally:
-    # ==========================================================
-    # CLEANUP
-    # ==========================================================
     print("\n" + "=" * 60)
     print("Cleaning up...")
     cap.release()
