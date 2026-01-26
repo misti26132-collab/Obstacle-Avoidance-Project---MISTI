@@ -22,7 +22,7 @@ if torch.cuda.is_available():
 print("=" * 60)
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,  # Changed from INFO to reduce overhead
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -55,23 +55,23 @@ class DualModelDetector:
     
     def __init__(self, depth_estimator, custom_model_path='runs/detect/blind_navigation/obstacles_v1/weights/best.pt', use_yolo_medium=False):
         model_name = 'yolov8m.pt' if use_yolo_medium else 'yolov8n.pt'
-        logger.info(f"[DualModel] Loading COCO model: {model_name}...")
-        logger.info("[DualModel] (First run will download model, please wait...)")
+        logger.warning(f"[DualModel] Loading COCO model: {model_name}...")
         
         device = 'cuda:0' if config.CUDA_DEVICE == 0 else 'cpu'
         self.yolo_coco = YOLO(model_name)
         self.yolo_coco.to(device)
-        logger.info(f"[DualModel] {model_name} loaded on {device}")
         
-        logger.info(f"[DualModel] Loading custom trained model: {custom_model_path}...")
+        # OPTIMIZATION: Disable verbose and set to eval mode
+        self.yolo_coco.overrides['verbose'] = False
+        
+        logger.warning(f"[DualModel] Loading custom model: {custom_model_path}...")
         try:
             self.yolo_custom = YOLO(custom_model_path)
             self.yolo_custom.to(device)
-            logger.info("[DualModel] Custom model loaded successfully")
-            logger.info(f"[DualModel] Custom classes: {list(self.yolo_custom.names.values())}")
+            self.yolo_custom.overrides['verbose'] = False
+            logger.warning("[DualModel] Custom model loaded")
         except Exception as e:
             logger.error(f"[DualModel] Failed to load custom model: {e}")
-            logger.error(f"[DualModel] Make sure the model exists at: {custom_model_path}")
             raise
         
         self.depth_estimator = depth_estimator
@@ -86,25 +86,24 @@ class DualModelDetector:
         
         self.frame_count = 0
         
+        # Cache for detections
         self.cached_depth_map = None
         self.cached_yolo_coco = []
         self.cached_yolo_custom = []
         
-        logger.info(f"[DualModel] Initialized: COCO ({model_name}) + Custom Model")
-        logger.info(f"[DualModel] Monitoring {len(self.coco_obstacle_classes)} COCO obstacle classes")
-        logger.info(f"[DualModel] Custom model has {len(self.yolo_custom.names)} classes")
-        logger.info(f"[DualModel] Frame skipping - Depth: every {config.DEPTH_FRAME_SKIP}, COCO: every {config.YOLO_COCO_FRAME_SKIP}, Custom: every {config.YOLO_CUSTOM_FRAME_SKIP}")
+        logger.warning(f"[DualModel] Frame skipping - Depth:{config.DEPTH_FRAME_SKIP} COCO:{config.YOLO_COCO_FRAME_SKIP} Custom:{config.YOLO_CUSTOM_FRAME_SKIP}")
     
     def process(self, frame):
         self.frame_height, self.frame_width = frame.shape[:2]
         self.frame_count += 1
         
+        # Depth estimation with frame skipping
         if self.frame_count % config.DEPTH_FRAME_SKIP == 0:
             try:
-                depth_map, depth_vis = self.depth_estimator.estimate_with_visualization(frame)
+                depth_map = self.depth_estimator.estimate(frame)
                 self.cached_depth_map = depth_map
             except Exception as e:
-                logger.error(f"[DualModel] Depth estimation error: {e}")
+                logger.error(f"[Depth] Error: {e}")
                 if self.cached_depth_map is None:
                     return frame, None, None, None
         else:
@@ -112,13 +111,18 @@ class DualModelDetector:
             if depth_map is None:
                 return frame, None, None, None
         
+        # YOLO COCO detection with frame skipping
         if self.frame_count % config.YOLO_COCO_FRAME_SKIP == 0:
             try:
                 yolo_results = self.yolo_coco(
                     frame, 
                     conf=config.YOLO_CONFIDENCE_FURNITURE,
+                    imgsz=config.YOLO_IMG_SIZE,
+                    max_det=config.YOLO_MAX_DET,
+                    agnostic_nms=config.YOLO_AGNOSTIC_NMS,
                     verbose=False,
-                    device=config.CUDA_DEVICE
+                    device=config.CUDA_DEVICE,
+                    half=config.USE_HALF_PRECISION
                 )
                 yolo_boxes = yolo_results[0].boxes
                 
@@ -144,7 +148,7 @@ class DualModelDetector:
                 
                 self.cached_yolo_coco = yolo_detections
             except Exception as e:
-                logger.error(f"[DualModel] YOLO COCO error: {e}")
+                logger.error(f"[COCO] Error: {e}")
         else:
             yolo_detections = self.cached_yolo_coco
         
@@ -154,8 +158,12 @@ class DualModelDetector:
                 custom_results = self.yolo_custom(
                     frame,
                     conf=0.3,
+                    imgsz=config.YOLO_IMG_SIZE,
+                    max_det=config.YOLO_MAX_DET,
+                    agnostic_nms=config.YOLO_AGNOSTIC_NMS,
                     verbose=False,
-                    device=config.CUDA_DEVICE
+                    device=config.CUDA_DEVICE,
+                    half=config.USE_HALF_PRECISION
                 )
                 custom_boxes = custom_results[0].boxes
                 
@@ -174,17 +182,12 @@ class DualModelDetector:
                 
                 self.cached_yolo_custom = custom_detections
             except Exception as e:
-                logger.error(f"[DualModel] Custom YOLO error: {e}")
+                logger.error(f"[Custom] Error: {e}")
         else:
             custom_detections = self.cached_yolo_custom
         
         # Merge detections
         all_detections = self._merge_detections(yolo_detections, custom_detections)
-        
-        if self.frame_count % 100 == 0 and len(all_detections) > 0:
-            coco_count = len(yolo_detections)
-            custom_count = len(custom_detections)
-            logger.info(f"[Stats] COCO: {coco_count}, Custom: {custom_count}, Total: {len(all_detections)}")
         
         if len(all_detections) == 0:
             return frame, None, None, None
@@ -281,12 +284,6 @@ class DualModelDetector:
         else:
             distance = "far"
         
-        logger.debug(
-            f"[Obstacle] {closest_obstacle['class']} "
-            f"[{closest_obstacle['source'].upper()}]: "
-            f"{direction} - {distance} (depth={closest_depth:.2f})"
-        )
-        
         return direction, distance, closest_obstacle
     
     def _draw_detections(self, frame, detections, closest):
@@ -380,7 +377,7 @@ class DualModelDetector:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Obstacle Avoidance System for Blind Assistance - Jetson Optimized'
+        description='Obstacle Avoidance System - Ultra Performance Mode'
     )
 
     parser.add_argument(
@@ -389,26 +386,28 @@ def main():
     )
     parser.add_argument(
         '--custom-model', type=str, default='runs/detect/blind_navigation/obstacles_v1/weights/best.pt',
-        help='Path to your custom trained YOLOv8 model'
+        help='Path to custom YOLOv8 model'
     )
     parser.add_argument(
         '--use-yolo-medium', action='store_true',
-        help='Use YOLOv8m (better accuracy, slower) instead of YOLOv8n (faster) for COCO'
+        help='Use YOLOv8m instead of YOLOv8n'
+    )
+    parser.add_argument(
+        '--no-display', action='store_true',
+        help='Disable video display for max performance'
     )
     args = parser.parse_args()
     
     print("=" * 60)
-    print("JETSON ORIN NANO - OBSTACLE AVOIDANCE SYSTEM")
+    print("JETSON ORIN NANO - ULTRA PERFORMANCE MODE")
     print("=" * 60)
     model_name = "YOLOv8m" if args.use_yolo_medium else "YOLOv8n"
-    print(f"Detection Mode: DUAL LOCAL MODELS ({model_name} COCO + Custom)")
-    print(f"Custom Model: {args.custom_model}")
-    print(f"Performance Mode: Frame Skipping Enabled")
-    print(f"  - Depth: Every {config.DEPTH_FRAME_SKIP} frames")
-    print(f"  - COCO YOLO: Every {config.YOLO_COCO_FRAME_SKIP} frames")
-    print(f"  - Custom YOLO: Every {config.YOLO_CUSTOM_FRAME_SKIP} frames")
+    print(f"Detection: {model_name} COCO + Custom")
+    print(f"Frame Skip: Depth={config.DEPTH_FRAME_SKIP}, COCO={config.YOLO_COCO_FRAME_SKIP}, Custom={config.YOLO_CUSTOM_FRAME_SKIP}")
+    print(f"YOLO Size: {config.YOLO_IMG_SIZE}px")
+    print(f"FP16: {config.USE_HALF_PRECISION}")
     
-    logger.info("[Camera] Initializing Jetson camera...")
+    logger.warning("[Camera] Initializing...")
     try:
         cap = JetsonCamera(
             camera_id=config.CAMERA_INDEX, 
@@ -416,36 +415,21 @@ def main():
             height=config.CAMERA_HEIGHT, 
             fps=config.CAMERA_FPS
         )
-        
         camera_info = cap.get_info()
-        logger.info(f"[Camera] {camera_info}")
-        print(f"\n[Camera] Initialized: {camera_info['backend']}")
-        print(f"[Camera] Resolution: {camera_info['width']}x{camera_info['height']} @ {camera_info['fps']}fps")
-        
+        print(f"Camera: {camera_info['width']}x{camera_info['height']} @ {camera_info['fps']}fps")
     except Exception as e:
-        logger.error(f"[Camera] Initialization failed: {e}")
-        print(f"\n[ERROR] Camera initialization failed: {e}")
-        print("\nTroubleshooting:")
-        print("1. Check camera connection (CSI ribbon or USB)")
-        print("2. For USB cameras: ls /dev/video*")
-        print("3. Check permissions: sudo usermod -aG video $USER")
-        print("4. Adjust config.py settings (USE_GSTREAMER, CAMERA_INDEX)")
+        print(f"[ERROR] Camera failed: {e}")
         return
     
-    logger.info("[Camera] Camera initialized successfully")
-    
-    # Initialize depth estimator
-    logger.info("[Depth] Initializing depth estimator...")
+    logger.warning("[Depth] Initializing...")
     try:
         depth_estimator = DepthEstimator()
     except Exception as e:
-        logger.error(f"[Depth] Failed to initialize: {e}")
-        print(f"\n[ERROR] Failed to initialize depth estimator: {e}")
+        print(f"[ERROR] Depth failed: {e}")
         cap.release()
         return
     
-    # Initialize dual model detector
-    logger.info("[Detector] Initializing dual model detector...")
+    logger.warning("[Detector] Initializing...")
     try:
         detector = DualModelDetector(
             depth_estimator,
@@ -453,56 +437,39 @@ def main():
             use_yolo_medium=args.use_yolo_medium
         )
     except Exception as e:
-        logger.error(f"[Detector] Failed to initialize: {e}")
-        print(f"\n[ERROR] Failed to initialize detector: {e}")
+        print(f"[ERROR] Detector failed: {e}")
         cap.release()
         return
 
-    # Initialize speech engine
-    logger.info("[Speech] Initializing speech engine...")
+    logger.warning("[Speech] Initializing...")
     try:
         speaker = SpeechEngine(cooldown=config.SPEECH_COOLDOWN)
     except Exception as e:
-        logger.error(f"[Speech] Failed to initialize: {e}")
-        print(f"\n[ERROR] Failed to initialize speech engine: {e}")
+        print(f"[ERROR] Speech failed: {e}")
         cap.release()
         return
     
     health_monitor = SystemHealthMonitor()
     
     print("\n" + "=" * 60)
-    print("SYSTEM READY")
+    print("SYSTEM READY - Press 'q' to quit")
     print("=" * 60)
-    print("Controls:")
-    print("  'q' - Quit")
-    print("  's' - Toggle split view (camera + depth)")
-    print("  'd' - Toggle debug info")
-    print("=" * 60)
-    print()
     
-    logger.info("[System] Warming up camera...")
+    # Warm-up
     for _ in range(5):
         cap.read()
     
-    show_split_view = False
-    show_debug = True
-    
+    show_display = not args.no_display
     fps_counter = 0
     fps_start = time.time()
     fps_display = 0.0
-    
     consecutive_errors = 0
-    max_consecutive_errors = config.MAX_CONSECUTIVE_ERRORS
     
-    cached_depth_vis = None
-    
-    # Main loop
     try:
         while True:
             ret, frame = cap.read()
             
             if not ret:
-                logger.warning("[Camera] Failed to read frame")
                 time.sleep(0.1)
                 continue
             
@@ -510,19 +477,18 @@ def main():
 
             try:
                 annotated_frame, direction, distance, obstacle_class = detector.process(frame)
-                
                 health_monitor.update_depth()
                 health_monitor.update_detection()
                 consecutive_errors = 0
                 
             except Exception as e:
-                logger.error(f"[Processing] Error: {e}", exc_info=True)
+                logger.error(f"[Processing] Error: {e}")
                 annotated_frame = frame
                 direction, distance, obstacle_class = None, None, None
-                
                 consecutive_errors += 1
-                if consecutive_errors >= max_consecutive_errors:
-                    logger.error("[Processing] Too many consecutive errors, reinitializing...")
+                
+                if consecutive_errors >= config.MAX_CONSECUTIVE_ERRORS:
+                    logger.error("[Processing] Too many errors, reinitializing...")
                     try:
                         detector = DualModelDetector(
                             depth_estimator,
@@ -530,9 +496,8 @@ def main():
                             use_yolo_medium=args.use_yolo_medium
                         )
                         consecutive_errors = 0
-                        logger.info("[Processing] Reinitialization successful")
                     except Exception as reinit_error:
-                        logger.critical(f"[Processing] Reinitialization failed: {reinit_error}")
+                        logger.critical(f"[Reinit] Failed: {reinit_error}")
                         break
 
             if direction is not None and distance is not None:
@@ -543,88 +508,37 @@ def main():
                 elapsed = time.time() - fps_start
                 fps_display = 30 / elapsed if elapsed > 0 else 0
                 
-                if show_debug:
-                    status = f"{direction} - {distance}" if direction else "No obstacles"
-                    logger.info(f"[Status] FPS: {fps_display:.1f} | {status}")
+                status = f"{direction} - {distance}" if direction else "Clear"
+                print(f"[FPS: {fps_display:.1f}] {status}")
                 
                 if fps_counter % config.HEALTH_CHECK_INTERVAL == 0:
-                    if not health_monitor.check_health():
-                        logger.warning("[System] Health check failed, monitor system")
+                    health_monitor.check_health()
                 
                 fps_start = time.time()
 
-            if show_split_view:
-                # Only regenerate depth visualization when depth is actually calculated
-                if fps_counter % config.DEPTH_FRAME_SKIP == 0:
-                    try:
-                        depth_map = detector.cached_depth_map
-                        if depth_map is not None:
-                            vis_raw = depth_map * 255
-                            depth_vis = vis_raw.astype(np.uint8)
-                            cached_depth_vis = cv2.applyColorMap(depth_vis, cv2.COLORMAP_MAGMA)
-                    except Exception as e:
-                        logger.error(f"[Display] Depth vis error: {e}")
-                
-                if cached_depth_vis is not None:
-                    try:
-                        display_height = 480
-                        display_width = 640
-                        frame_resized = cv2.resize(annotated_frame, (display_width, display_height))
-                        depth_resized = cv2.resize(cached_depth_vis, (display_width, display_height))
-                        
-                        cv2.putText(
-                            frame_resized, "CAMERA", (10, 30), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2
-                        )
-                        cv2.putText(
-                            depth_resized, "DEPTH", (10, 30), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2
-                        )
-                        
-                        display_frame = np.hstack([frame_resized, depth_resized])
-                    except Exception as e:
-                        logger.error(f"[Display] Split view error: {e}")
-                        display_frame = annotated_frame
-                else:
-                    display_frame = annotated_frame
-            else:
-                display_frame = annotated_frame
-
-            if show_debug:
+            if show_display:
                 cv2.putText(
-                    display_frame, f"FPS: {fps_display:.1f}", 
-                    (10, display_frame.shape[0] - 10), 
+                    annotated_frame, f"FPS: {fps_display:.1f}", 
+                    (10, annotated_frame.shape[0] - 10), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2
                 )
+                cv2.imshow("Obstacle Avoidance", annotated_frame)
 
-            cv2.imshow("Obstacle Avoidance System", display_frame)
-
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):
-                logger.info("[System] Shutting down...")
-                break
-            elif key == ord('s'):
-                show_split_view = not show_split_view
-                mode = "Split View" if show_split_view else "Camera Only"
-                logger.info(f"[Display] Switched to {mode}")
-            elif key == ord('d'):
-                show_debug = not show_debug
-                status = "enabled" if show_debug else "disabled"
-                logger.info(f"[Display] Debug info {status}")
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
+                    break
 
     except KeyboardInterrupt:
-        logger.info("[System] Interrupted by user")
-    
+        print("\n[System] Interrupted")
     except Exception as e:
-        logger.error(f"[System] Unexpected error: {e}", exc_info=True)
-    
+        logger.error(f"[System] Error: {e}", exc_info=True)
     finally:
-        logger.info("[System] Cleaning up...")
+        print("[System] Cleaning up...")
         cap.release()
-        cv2.destroyAllWindows()
+        if show_display:
+            cv2.destroyAllWindows()
         speaker.stop()
-        logger.info("[System] Shutdown complete")
-        print("=" * 60)
+        print("Shutdown complete")
 
 
 if __name__ == "__main__":
