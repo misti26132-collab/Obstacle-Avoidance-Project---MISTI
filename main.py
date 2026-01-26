@@ -61,7 +61,6 @@ class DualModelDetector:
         self.yolo_coco = YOLO(model_name)
         self.yolo_coco.to(device)
         
-        # OPTIMIZATION: Disable verbose and set to eval mode
         self.yolo_coco.overrides['verbose'] = False
         
         logger.warning(f"[DualModel] Loading custom model: {custom_model_path}...")
@@ -86,7 +85,6 @@ class DualModelDetector:
         
         self.frame_count = 0
         
-        # Cache for detections
         self.cached_depth_map = None
         self.cached_yolo_coco = []
         self.cached_yolo_custom = []
@@ -97,7 +95,6 @@ class DualModelDetector:
         self.frame_height, self.frame_width = frame.shape[:2]
         self.frame_count += 1
         
-        # Depth estimation with frame skipping
         if self.frame_count % config.DEPTH_FRAME_SKIP == 0:
             try:
                 depth_map = self.depth_estimator.estimate(frame)
@@ -111,7 +108,6 @@ class DualModelDetector:
             if depth_map is None:
                 return frame, None, None, None
         
-        # YOLO COCO detection with frame skipping
         if self.frame_count % config.YOLO_COCO_FRAME_SKIP == 0:
             try:
                 yolo_results = self.yolo_coco(
