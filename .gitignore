@@ -41,6 +41,4 @@ logs/
 torch/hub/
 .cache/
 
-tmp/
-temp/
-*.tmp
+tmp_cusparself/
