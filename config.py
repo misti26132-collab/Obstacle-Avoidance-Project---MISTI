@@ -16,30 +16,10 @@ GSTREAMER_PIPELINE = (
     "appsink drop=1"
 )
 
-CAMERA_INDEX = 0
-CAMERA_WIDTH = 640
-CAMERA_HEIGHT = 480
-CAMERA_FPS = 30
-
-USE_GSTREAMER = True
-CAMERA_FLIP_METHOD = 0
-
-GSTREAMER_PIPELINE = (
-    "nvarguscamerasrc sensor-id=0 ! "
-    "video/x-raw(memory:NVMM), width=1920, height=1080, format=NV12, framerate=30/1 ! "
-    "nvvidconv flip-method=0 ! "
-    "video/x-raw, width=640, height=480, format=BGRx ! "
-    "videoconvert ! "
-    "video/x-raw, format=BGR ! "
-    "appsink drop=1"
-)
-
-
 DEPTH_FRAME_SKIP = 5       
 YOLO_COCO_FRAME_SKIP = 4   
 YOLO_CUSTOM_FRAME_SKIP = 3  
 
-# Detection Settings
 YOLO_CONFIDENCE = 0.55      
 YOLO_CONFIDENCE_FURNITURE = 0.40  
 FURNITURE_CLASSES = [
@@ -79,3 +59,11 @@ BATCH_SIZE = 1
 YOLO_IMG_SIZE = 416         
 YOLO_MAX_DET = 10           
 YOLO_AGNOSTIC_NMS = True    
+
+CUSTOM_MODEL_CONFIDENCE = {
+    'pillar': 0.70,      
+    'chair': 0.65,      
+    'table': 0.55,      
+    'wall': 0.5,
+    'default': 0.35      
+}
