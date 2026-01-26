@@ -4,7 +4,7 @@ import numpy as np
 import argparse
 import logging
 from depth import DepthEstimator
-from Speech import SpeechEngine
+from Speech_new import SpeechEngine
 from ultralytics import YOLO
 from health_check import SystemHealthMonitor
 from camera_utils import JetsonCamera
@@ -157,7 +157,7 @@ class DualModelDetector:
             try:
                 custom_results = self.yolo_custom(
                     frame,
-                    conf=0.3,
+                    conf=0.25,
                     imgsz=config.YOLO_IMG_SIZE,
                     max_det=config.YOLO_MAX_DET,
                     agnostic_nms=config.YOLO_AGNOSTIC_NMS,
@@ -172,13 +172,20 @@ class DualModelDetector:
                     class_id = int(box.cls[0])
                     class_name = self.yolo_custom.names[class_id]
                     confidence = float(box.conf[0])
-                    
+    
+                    # Get class-specific confidence threshold
+                min_confidence = config.CUSTOM_MODEL_CONFIDENCE.get(
+                    class_name.lower(), 
+                    config.CUSTOM_MODEL_CONFIDENCE['default']
+                )
+    
+                if confidence >= min_confidence:
                     custom_detections.append({
                         'box': box.xyxy[0].cpu().numpy(),
                         'class': class_name,
                         'confidence': confidence,
                         'source': 'custom'
-                    })
+                })
                 
                 self.cached_yolo_custom = custom_detections
             except Exception as e:
