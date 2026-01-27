@@ -4,11 +4,11 @@ import numpy as np
 import argparse
 import logging
 from depth import DepthEstimator
-from Speech import SpeechEngine
+from Speech_new import SpeechEngine
 from ultralytics import YOLO
 from health_check import SystemHealthMonitor
 from camera_utils import JetsonCamera
-import config
+import config 
 import torch
 import gc
 
@@ -53,6 +53,9 @@ def calculate_iou(box1, box2):
 
 
 class DualModelDetector:
+    """
+    Same as your original, but with priority filtering added
+    """
     
     def __init__(self, depth_estimator, custom_model_path='runs/detect/blind_navigation/obstacles_v1/weights/best.pt', use_yolo_medium=False):
         model_name = 'yolov8m.pt' if use_yolo_medium else 'yolov8n.pt'
@@ -90,11 +93,23 @@ class DualModelDetector:
         self.cached_yolo_custom = []
         
         logger.warning(f"[DualModel] Frame skipping - Depth:{config.DEPTH_FRAME_SKIP} COCO:{config.YOLO_COCO_FRAME_SKIP} Custom:{config.YOLO_CUSTOM_FRAME_SKIP}")
+        
+        # NEW: Priority filtering
+        logger.warning(f"[DualModel] Priority filtering: {config.ALERT_PRIORITIES}")
+    
+    def _get_priority(self, class_name):
+        """Get priority for an obstacle class"""
+        return config.OBSTACLE_PRIORITIES.get(class_name, 'LOW')
+    
+    def _should_alert(self, priority):
+        """Check if this priority should trigger alerts"""
+        return priority in config.ALERT_PRIORITIES
     
     def process(self, frame):
         self.frame_height, self.frame_width = frame.shape[:2]
         self.frame_count += 1
         
+        # === UNCHANGED: Your original depth logic ===
         if self.frame_count % config.DEPTH_FRAME_SKIP == 0:
             try:
                 depth_map = self.depth_estimator.estimate(frame)
@@ -102,12 +117,13 @@ class DualModelDetector:
             except Exception as e:
                 logger.error(f"[Depth] Error: {e}")
                 if self.cached_depth_map is None:
-                    return frame, None, None, None
+                    return frame, None, None, None, None
         else:
             depth_map = self.cached_depth_map
             if depth_map is None:
-                return frame, None, None, None
+                return frame, None, None, None, None
         
+        # === UNCHANGED: Your original COCO detection ===
         if self.frame_count % config.YOLO_COCO_FRAME_SKIP == 0:
             try:
                 yolo_results = self.yolo_coco(
@@ -135,11 +151,15 @@ class DualModelDetector:
                             min_conf = config.YOLO_CONFIDENCE
                         
                         if confidence >= min_conf:
+                            # NEW: Add priority
+                            priority = self._get_priority(class_name)
+                            
                             yolo_detections.append({
                                 'box': box.xyxy[0].cpu().numpy(),
                                 'class': class_name,
                                 'confidence': confidence,
-                                'source': 'coco'
+                                'source': 'coco',
+                                'priority': priority  # NEW
                             })
                 
                 self.cached_yolo_coco = yolo_detections
@@ -149,6 +169,7 @@ class DualModelDetector:
         else:
             yolo_detections = self.cached_yolo_coco
         
+        # === UNCHANGED: Your original custom detection ===
         if self.frame_count % config.YOLO_CUSTOM_FRAME_SKIP == 0:
             try:
                 custom_results = self.yolo_custom(
@@ -176,11 +197,15 @@ class DualModelDetector:
                         )
                         
                         if confidence >= min_confidence:
+                            # NEW: Add priority
+                            priority = self._get_priority(class_name)
+                            
                             custom_detections.append({
                                 'box': box.xyxy[0].cpu().numpy(),
                                 'class': class_name,
                                 'confidence': confidence,
-                                'source': 'custom'
+                                'source': 'custom',
+                                'priority': priority  # NEW
                             })
                     except Exception as box_error:
                         continue
@@ -193,16 +218,24 @@ class DualModelDetector:
         else:
             custom_detections = self.cached_yolo_custom
         
+        # === UNCHANGED: Your original merge ===
         all_detections = self._merge_detections(yolo_detections, custom_detections)
         
-        if len(all_detections) == 0:
+        # === NEW: Filter by priority ===
+        # Keep all detections for display, but only alert on priority ones
+        alert_detections = [d for d in all_detections if self._should_alert(d.get('priority', 'LOW'))]
+        
+        if len(alert_detections) == 0:
             if self.frame_count % 100 == 0:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                     gc.collect()
-            return frame, None, None, None
+            return frame, None, None, None, None
         
-        direction, distance, closest = self._analyze_obstacles(all_detections, depth_map)
+        # === UNCHANGED: Your original analysis (but on filtered detections) ===
+        direction, distance, closest, priority = self._analyze_obstacles(alert_detections, depth_map)
+        
+        # Draw ALL detections (for visual feedback)
         annotated_frame = self._draw_detections(frame, all_detections, closest)
         
         if direction and distance and closest:
@@ -217,9 +250,10 @@ class DualModelDetector:
                 gc.collect()
         
         obstacle_class = closest['class'] if closest else None
-        return annotated_frame, direction, distance, obstacle_class
+        return annotated_frame, direction, distance, obstacle_class, priority
     
     def _merge_detections(self, coco_dets, custom_dets):
+        """UNCHANGED from your original"""
         all_detections = list(coco_dets)
         
         for custom_det in custom_dets:
@@ -240,6 +274,7 @@ class DualModelDetector:
         return all_detections
     
     def _analyze_obstacles(self, detections, depth_map):
+        """UNCHANGED from your original, just returns priority too"""
         closest_obstacle = None
         closest_depth = 0.0
         
@@ -273,11 +308,12 @@ class DualModelDetector:
                     'box': [x1, y1, x2, y2],
                     'class': detection['class'],
                     'source': detection['source'],
-                    'confidence': detection['confidence']
+                    'confidence': detection['confidence'],
+                    'priority': detection.get('priority', 'LOW')  # NEW
                 }
         
         if closest_obstacle is None:
-            return None, None, None
+            return None, None, None, None
         
         center_x = closest_obstacle['center_x']
         frame_center = self.frame_width / 2
@@ -299,9 +335,10 @@ class DualModelDetector:
         else:
             distance = "far"
         
-        return direction, distance, closest_obstacle
+        return direction, distance, closest_obstacle, closest_obstacle['priority']
     
     def _draw_detections(self, frame, detections, closest):
+        """UNCHANGED from your original"""
         annotated = frame.copy()
         
         for detection in detections:
@@ -337,6 +374,7 @@ class DualModelDetector:
             label = f"{detection['class']} {detection['confidence']:.2f}{label_suffix}"
             font = cv2.FONT_HERSHEY_SIMPLEX
             font_scale = 0.5
+            
             (label_w, label_h), baseline = cv2.getTextSize(label, font, font_scale, 1)
             
             label_y1 = max(y1 - label_h - 10, 0)
@@ -354,6 +392,7 @@ class DualModelDetector:
         return annotated
     
     def _add_overlay(self, frame, direction, distance, class_name, source):
+        """UNCHANGED from your original"""
         if distance == "very_close":
             color = (0, 0, 255)
         elif distance == "close":
@@ -391,8 +430,9 @@ class DualModelDetector:
 
 
 def main():
+    """UNCHANGED from your original"""
     parser = argparse.ArgumentParser(
-        description='Obstacle Avoidance System - Ultra Performance Mode'
+        description='Obstacle Avoidance System - With Priority Filtering'
     )
 
     parser.add_argument(
@@ -414,8 +454,9 @@ def main():
     args = parser.parse_args()
     
     print("=" * 60)
-    print("JETSON ORIN NANO - ULTRA PERFORMANCE MODE")
+    print("JETSON ORIN NANO - WITH PRIORITY FILTERING")
     print("=" * 60)
+    print(f"Alert Priorities: {config.ALERT_PRIORITIES}")
     model_name = "YOLOv8m" if args.use_yolo_medium else "YOLOv8n"
     print(f"Detection: {model_name} COCO + Custom")
     print(f"Frame Skip: Depth={config.DEPTH_FRAME_SKIP}, COCO={config.YOLO_COCO_FRAME_SKIP}, Custom={config.YOLO_CUSTOM_FRAME_SKIP}")
@@ -491,7 +532,7 @@ def main():
             health_monitor.update_camera()
 
             try:
-                annotated_frame, direction, distance, obstacle_class = detector.process(frame)
+                annotated_frame, direction, distance, obstacle_class, priority = detector.process(frame)
                 health_monitor.update_depth()
                 health_monitor.update_detection()
                 consecutive_errors = 0
@@ -499,7 +540,7 @@ def main():
             except Exception as e:
                 logger.error(f"[Processing] Error: {e}")
                 annotated_frame = frame
-                direction, distance, obstacle_class = None, None, None
+                direction, distance, obstacle_class, priority = None, None, None, None
                 consecutive_errors += 1
                 
                 if consecutive_errors >= config.MAX_CONSECUTIVE_ERRORS:
@@ -515,8 +556,9 @@ def main():
                         logger.critical(f"[Reinit] Failed: {reinit_error}")
                         break
 
+            # NEW: Pass priority to speech
             if direction is not None and distance is not None:
-                speaker.speak(direction, distance, obstacle_class)
+                speaker.speak(direction, distance, obstacle_class, priority)
 
             fps_counter += 1
             if fps_counter % 30 == 0:

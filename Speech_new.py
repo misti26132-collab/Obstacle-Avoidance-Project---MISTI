@@ -1,28 +1,21 @@
 import pyttsx3
 import time
 import logging
-import threading
+import config
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class SpeechEngine:
-    
     def __init__(self, cooldown=3.0):
-        self.enabled = True
-        self.engine = None
-        self.speech_thread = None
-        self.is_speaking = False
-        
         try:
-            self.engine = pyttsx3.init()
+            self.engine = pyttsx3.init() 
             self.engine.setProperty("rate", 175)
             self.engine.setProperty("volume", 1.0)
             logger.info("[Speech] Engine initialized successfully")
         except Exception as e:
-            logger.warning(f"[Speech] Failed to initialize TTS: {e}")
-            logger.warning("[Speech] Continuing without audio")
-            self.enabled = False
+            logger.error(f"[Speech] Failed to initialize TTS engine: {e}")
+            raise
 
         self.cooldown = cooldown
         self.last_spoken_time = 0.0
@@ -35,41 +28,18 @@ class SpeechEngine:
             "close": 2,
             "far": 1
         }
-        
-        if self.enabled:
-            logger.info("[Speech] Ready for Obstacle Avoidance")
-        else:
-            logger.info("[Speech] Running in silent mode (no audio device)")
+        logger.info("[Speech] Ready for Obstacle Avoidance")
 
     def stop(self):
-        if not self.enabled:
-            return
-            
-        if self.speech_thread and self.speech_thread.is_alive():
-            self.speech_thread.join(timeout=1.0)
-        
+        """Safely shuts down the engine"""
         try:
-            if self.engine:
-                self.engine.stop()
+            self.engine.stop()
             logger.info("[Speech] Engine stopped")
         except Exception as e:
-            logger.debug(f"[Speech] Stop error: {e}")
+            logger.debug(f"[Speech] Stop called on inactive engine: {e}")
 
-    def _speak_thread(self, message):
-        try:
-            self.is_speaking = True
-            self.engine.say(message)
-            self.engine.runAndWait()
-        except Exception as e:
-            logger.warning(f"[Speech] Error during speech: {e}")
-        finally:
-            self.is_speaking = False
-
-    def speak(self, direction, distance, obstacle_class=None):
-        if not self.enabled:
-            return  # Silent mode
-            
-        message = self._build_message(direction, distance, obstacle_class)
+    def speak(self, direction, distance, obstacle_class=None, priority='HIGH'):
+        message = self._build_message(direction, distance, obstacle_class, priority)
         if not message:
             return
 
@@ -82,26 +52,44 @@ class SpeechEngine:
         if self.last_distance:
             got_closer = self.distance_priority.get(distance, 0) > self.distance_priority.get(self.last_distance, 0)
 
-        if self.is_speaking:
-            return
-
         if elapsed >= min_cooldown or got_closer:
-            # Start speech in background thread
-            self.speech_thread = threading.Thread(
-                target=self._speak_thread,
-                args=(message,),
-                daemon=True
-            )
-            self.speech_thread.start()
-            
-            self.last_spoken_time = now
-            self.last_distance = distance
-            self.last_direction = direction
+            try:
+                self.engine.say(message)
+                self.engine.runAndWait()
+                self.last_spoken_time = now
+                self.last_distance = distance
+                self.last_direction = direction
+            except RuntimeError:
+                logger.warning("[Speech] Engine loop busy - skipping frame")
 
-    def _build_message(self, direction, distance, obstacle_class=None):
-        prefix = f"{obstacle_class} " if obstacle_class else ""
+    def _build_message(self, direction, distance, obstacle_class=None, priority='HIGH'):
+        try:
+            friendly_name = config.FRIENDLY_NAMES.get(obstacle_class, obstacle_class)
+        except ImportError:
+            friendly_name = obstacle_class
+        
+        if not friendly_name:
+            friendly_name = "obstacle"
+        
+        # Direction phrases
+        direction_phrases = {
+            'left': 'on your left',
+            'center': 'directly ahead',
+            'right': 'on your right'
+        }
+        direction_phrase = direction_phrases.get(direction, direction)
+        
         if distance == "very_close":
-            return f"Danger! {prefix}{direction} very close!"
-        if distance == "close":
-            return f"{prefix}Ahead {direction}."
-        return ""
+            if priority == 'CRITICAL':
+                return f"Stop! {friendly_name.capitalize()} {direction_phrase}!"
+            else:
+                return f"Warning! {friendly_name.capitalize()} {direction_phrase}!"
+        
+        elif distance == "close":
+            if priority == 'CRITICAL':
+                return f"{friendly_name.capitalize()} approaching {direction_phrase}"
+            else:
+                return f"{friendly_name.capitalize()} {direction_phrase}"
+        
+        else:
+            return ""
