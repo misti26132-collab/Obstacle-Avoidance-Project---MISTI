@@ -2,14 +2,12 @@ import pyttsx3
 import time
 import logging
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class SpeechEngine:
     def __init__(self, cooldown=3.0):
         try:
-            # On Jetson, the 'espeak' driver is usually the most stable
             self.engine = pyttsx3.init() 
             self.engine.setProperty("rate", 175)
             self.engine.setProperty("volume", 1.0)
@@ -47,7 +45,6 @@ class SpeechEngine:
         now = time.time()
         elapsed = now - self.last_spoken_time
 
-        # Dynamic cooldown logic
         min_cooldown = 0.5 if distance == "very_close" else 2.5
         
         got_closer = False
