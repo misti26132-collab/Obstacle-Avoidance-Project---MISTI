@@ -7,7 +7,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class SpeechEngine:
-    """Non-blocking speech engine for better performance"""
     
     def __init__(self, cooldown=3.0):
         self.enabled = True
@@ -43,7 +42,6 @@ class SpeechEngine:
             logger.info("[Speech] Running in silent mode (no audio device)")
 
     def stop(self):
-        """Safely shuts down the engine"""
         if not self.enabled:
             return
             
@@ -59,7 +57,6 @@ class SpeechEngine:
             logger.debug(f"[Speech] Stop error: {e}")
 
     def _speak_thread(self, message):
-        """Run speech in separate thread to avoid blocking"""
         try:
             self.is_speaking = True
             self.engine.say(message)
@@ -80,14 +77,12 @@ class SpeechEngine:
         now = time.time()
         elapsed = now - self.last_spoken_time
 
-        # Dynamic cooldown logic
         min_cooldown = 0.5 if distance == "very_close" else 2.5
         
         got_closer = False
         if self.last_distance:
             got_closer = self.distance_priority.get(distance, 0) > self.distance_priority.get(self.last_distance, 0)
 
-        # Don't interrupt ongoing speech
         if self.is_speaking:
             return
 
