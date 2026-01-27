@@ -4,12 +4,13 @@ import numpy as np
 import argparse
 import logging
 from depth import DepthEstimator
-from Speech_new import SpeechEngine
+from Speech import SpeechEngine
 from ultralytics import YOLO
 from health_check import SystemHealthMonitor
 from camera_utils import JetsonCamera
 import config
 import torch
+import gc
 
 print("=" * 60)
 print("GPU STATUS CHECK")
@@ -22,7 +23,7 @@ if torch.cuda.is_available():
 print("=" * 60)
 
 logging.basicConfig(
-    level=logging.WARNING,  # Changed from INFO to reduce overhead
+    level=logging.WARNING,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -60,7 +61,6 @@ class DualModelDetector:
         device = 'cuda:0' if config.CUDA_DEVICE == 0 else 'cpu'
         self.yolo_coco = YOLO(model_name)
         self.yolo_coco.to(device)
-        
         self.yolo_coco.overrides['verbose'] = False
         
         logger.warning(f"[DualModel] Loading custom model: {custom_model_path}...")
@@ -145,10 +145,10 @@ class DualModelDetector:
                 self.cached_yolo_coco = yolo_detections
             except Exception as e:
                 logger.error(f"[COCO] Error: {e}")
+                yolo_detections = self.cached_yolo_coco
         else:
             yolo_detections = self.cached_yolo_coco
         
-        # Custom YOLO detection with frame skipping
         if self.frame_count % config.YOLO_CUSTOM_FRAME_SKIP == 0:
             try:
                 custom_results = self.yolo_custom(
@@ -165,34 +165,41 @@ class DualModelDetector:
                 
                 custom_detections = []
                 for box in custom_boxes:
-                    class_id = int(box.cls[0])
-                    class_name = self.yolo_custom.names[class_id]
-                    confidence = float(box.conf[0])
-    
-                    # Get class-specific confidence threshold
-                min_confidence = config.CUSTOM_MODEL_CONFIDENCE.get(
-                    class_name.lower(), 
-                    config.CUSTOM_MODEL_CONFIDENCE['default']
-                )
-    
-                if confidence >= min_confidence:
-                    custom_detections.append({
-                        'box': box.xyxy[0].cpu().numpy(),
-                        'class': class_name,
-                        'confidence': confidence,
-                        'source': 'custom'
-                })
+                    try:
+                        class_id = int(box.cls[0])
+                        class_name = self.yolo_custom.names[class_id]
+                        confidence = float(box.conf[0])
+                        
+                        min_confidence = config.CUSTOM_MODEL_CONFIDENCE.get(
+                            class_name.lower(), 
+                            config.CUSTOM_MODEL_CONFIDENCE['default']
+                        )
+                        
+                        if confidence >= min_confidence:
+                            custom_detections.append({
+                                'box': box.xyxy[0].cpu().numpy(),
+                                'class': class_name,
+                                'confidence': confidence,
+                                'source': 'custom'
+                            })
+                    except Exception as box_error:
+                        continue
                 
                 self.cached_yolo_custom = custom_detections
+                
             except Exception as e:
                 logger.error(f"[Custom] Error: {e}")
+                custom_detections = self.cached_yolo_custom
         else:
             custom_detections = self.cached_yolo_custom
         
-        # Merge detections
         all_detections = self._merge_detections(yolo_detections, custom_detections)
         
         if len(all_detections) == 0:
+            if self.frame_count % 100 == 0:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    gc.collect()
             return frame, None, None, None
         
         direction, distance, closest = self._analyze_obstacles(all_detections, depth_map)
@@ -203,6 +210,11 @@ class DualModelDetector:
                 annotated_frame, direction, distance, 
                 closest['class'], closest['source']
             )
+        
+        if self.frame_count % 100 == 0:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                gc.collect()
         
         obstacle_class = closest['class'] if closest else None
         return annotated_frame, direction, distance, obstacle_class
