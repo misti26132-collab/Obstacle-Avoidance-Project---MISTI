@@ -1,6 +1,6 @@
 CAMERA_INDEX = 0
-CAMERA_WIDTH = 640
-CAMERA_HEIGHT = 480
+CAMERA_WIDTH = 416
+CAMERA_HEIGHT = 416
 CAMERA_FPS = 30
 
 USE_GSTREAMER = True
@@ -13,12 +13,12 @@ GSTREAMER_PIPELINE = (
     "video/x-raw, width=640, height=480, format=BGRx ! "
     "videoconvert ! "
     "video/x-raw, format=BGR ! "
-    "appsink drop=1"
+    "appsink"
 )
 
-DEPTH_FRAME_SKIP = 6        
-YOLO_COCO_FRAME_SKIP = 5    
-YOLO_CUSTOM_FRAME_SKIP = 4  
+DEPTH_FRAME_SKIP = 8        
+YOLO_COCO_FRAME_SKIP = 10    
+YOLO_CUSTOM_FRAME_SKIP = 8  
 
 YOLO_CONFIDENCE = 0.55
 YOLO_CONFIDENCE_FURNITURE = 0.40
@@ -61,8 +61,8 @@ CUDA_DEVICE = 0
 NUM_WORKERS = 2
 BATCH_SIZE = 1
 
-YOLO_IMG_SIZE = 320         
-YOLO_MAX_DET = 10          
+YOLO_IMG_SIZE = 288         
+YOLO_MAX_DET = 7          
 YOLO_AGNOSTIC_NMS = True   
 
 OBSTACLE_PRIORITIES = {
