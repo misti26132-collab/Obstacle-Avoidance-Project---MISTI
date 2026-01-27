@@ -44,7 +44,6 @@ DEPTH_MIN_PERCENTILE = 10
 DEPTH_MAX_PERCENTILE = 90
 USE_HALF_PRECISION = True  
 
-
 VERY_CLOSE_THRESHOLD = 0.75
 CLOSE_THRESHOLD = 0.5
 
@@ -65,3 +64,52 @@ BATCH_SIZE = 1
 YOLO_IMG_SIZE = 320         
 YOLO_MAX_DET = 10          
 YOLO_AGNOSTIC_NMS = True   
+
+OBSTACLE_PRIORITIES = {
+    'person': 'CRITICAL',
+    'car': 'CRITICAL',
+    'truck': 'CRITICAL',
+    'bus': 'CRITICAL',
+    'motorcycle': 'CRITICAL',
+    'bicycle': 'CRITICAL',
+    
+    'chair': 'HIGH',
+    'bench': 'HIGH',
+    'table': 'HIGH',
+    'pillar': 'HIGH',
+    'couch': 'HIGH',
+    'potted plant': 'HIGH',
+    'backpack': 'HIGH',
+    'suitcase': 'HIGH',
+    'dining table': 'HIGH',
+    
+    'bottle': 'LOW',
+    'tv': 'LOW',
+    'laptop': 'LOW',
+    'keyboard': 'LOW',
+    'cell phone': 'LOW',
+    'handbag': 'LOW',
+    'bed': 'LOW',
+}
+
+ALERT_PRIORITIES = ['CRITICAL', 'HIGH']
+
+FRIENDLY_NAMES = {
+    'person': 'person',
+    'bicycle': 'bicycle',
+    'car': 'car',
+    'motorcycle': 'motorcycle',
+    'bus': 'bus',
+    'truck': 'truck',
+    'chair': 'chair',
+    'couch': 'couch',
+    'potted plant': 'plant',
+    'bed': 'bed',
+    'dining table': 'table',
+    'bench': 'bench',
+    'backpack': 'backpack',
+    'suitcase': 'suitcase',
+    'handbag': 'bag',
+    'pillar': 'pole',
+    'table': 'table',
+}
