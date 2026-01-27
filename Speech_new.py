@@ -45,7 +45,6 @@ class SpeechEngine:
         if not self.enabled:
             return
             
-        # Wait for any ongoing speech to finish
         if self.speech_thread and self.speech_thread.is_alive():
             self.speech_thread.join(timeout=1.0)
         
