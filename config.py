@@ -20,7 +20,6 @@ DEPTH_FRAME_SKIP = 6
 YOLO_COCO_FRAME_SKIP = 5    
 YOLO_CUSTOM_FRAME_SKIP = 4  
 
-
 YOLO_CONFIDENCE = 0.55
 YOLO_CONFIDENCE_FURNITURE = 0.40
 FURNITURE_CLASSES = [
@@ -30,10 +29,10 @@ FURNITURE_CLASSES = [
 IOU_THRESHOLD_MERGE = 0.7
 
 CUSTOM_MODEL_CONFIDENCE = {
-    'pillar': 0.65,     
-    'chair': 0.60,       
-    'table': 0.60,      
-    'default': 0.35     
+    'pillar': 0.5,     
+    'chair': 0.3,       
+    'table': 0.5,      
+    'default': 0.3     
 }
 
 SPEECH_COOLDOWN = 2.0
