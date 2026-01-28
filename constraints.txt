@@ -1,4 +1,0 @@
-# Constraint file to prevent torch/torchvision downgrades
-# This ensures PyTorch stays at the NVIDIA Jetson-optimized version
-
-torch==2.5.0a0+872d972e41.nv24.08.17622132
