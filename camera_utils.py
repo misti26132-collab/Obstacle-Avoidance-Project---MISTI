@@ -18,7 +18,7 @@ class JetsonCamera:
         
         # Import config here to avoid circular imports
         try:
-            import config_priority as config
+            import config as config
         except ImportError:
             try:
                 import config
