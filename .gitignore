@@ -22,6 +22,7 @@ tensorrt_libs
 install_cusparself.sh
 *.engine
 *.trt
+torchvision_BACKUP/
 
 runs/
 My First Project.v3i.yolov8/

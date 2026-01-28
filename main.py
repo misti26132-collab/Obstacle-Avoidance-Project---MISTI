@@ -494,25 +494,23 @@ def main():
     # Initialize camera
     logger.info("Initializing camera...")
     try:
-        # Try Jetson camera first
-        try:
-            from camera_utils import JetsonCamera
-            cap = JetsonCamera(
-                camera_id=args.camera,
-                width=640,
-                height=480,
-                fps=30
-            )
-            logger.info("Using Jetson CSI camera")
-        except:
-            # Fallback to USB camera
-            cap = cv2.VideoCapture(args.camera)
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-            cap.set(cv2.CAP_PROP_FPS, 30)
-            logger.info("Using USB camera")
+        from camera_utils import JetsonCamera
+        cap = JetsonCamera(
+            camera_id=args.camera,
+            width=640,
+            height=480,
+            fps=30
+        )
+        
+        if not cap.isOpened():
+            logger.error("JetsonCamera failed to initialize")
+            return
+            
+        logger.info("✅ Jetson CSI camera initialized successfully")
     except Exception as e:
         logger.error(f"Camera initialization failed: {e}")
+        import traceback
+        traceback.print_exc()
         return
     
     # Initialize detector
@@ -538,17 +536,12 @@ def main():
             cap.release()
         return
     
-    print("\n" + "=" * 60)
+    print("=" * 60)
     print("SYSTEM READY")
     print("=" * 60)
     print("Detection: COCO (people/cars) + Custom (walls/poles/tables)")
     print("Press 'q' to quit")
     print("=" * 60)
-    
-    # Warm up camera
-    for _ in range(5):
-        if hasattr(cap, 'read'):
-            cap.read()
     
     show_display = not args.no_display
     fps_counter = 0

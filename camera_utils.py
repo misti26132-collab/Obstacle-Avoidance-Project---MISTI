@@ -1,5 +1,6 @@
 import cv2
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -87,21 +88,34 @@ class JetsonCamera:
     
     def _init_v4l2(self):
         try:
+            logger.info("[Camera] Opening V4L2 device...")
             self.cap = cv2.VideoCapture(self.camera_id, cv2.CAP_V4L2)
             
-            if self.cap.isOpened():
-                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-                self.cap.set(cv2.CAP_PROP_FPS, self.fps)
-                
+            if not self.cap.isOpened():
+                logger.error("[Camera] V4L2 device not found")
+                return False
+            
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            self.cap.set(cv2.CAP_PROP_FPS, self.fps)
+            
+            logger.info("[Camera] V4L2 device opened, warming up...")
+            time.sleep(1)
+            
+            # Warmup frames - CSI camera needs more time
+            for i in range(20):
                 ret, frame = self.cap.read()
                 if ret and frame is not None:
-                    logger.info(f"[Camera] V4L2 test read successful: {frame.shape}")
-                    return True
+                    logger.debug(f"[Camera] Warmup {i+1}/20: OK ({frame.shape})")
+                    if i >= 10:
+                        logger.info("[Camera] ✅ V4L2 initialized and ready")
+                        return True
                 else:
-                    logger.warning("[Camera] V4L2 opened but can't read frames")
-                    self.cap.release()
-                    return False
+                    logger.debug(f"[Camera] Warmup {i+1}/20: Failed")
+                    time.sleep(0.2)
+            
+            logger.warning("[Camera] V4L2 could not get valid frames")
+            self.cap.release()
             return False
             
         except Exception as e:
@@ -120,15 +134,16 @@ class JetsonCamera:
                 self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
                 self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
                 
-                # Test read
-                ret, frame = self.cap.read()
-                if ret and frame is not None:
-                    logger.info(f"[Camera] Basic test read successful: {frame.shape}")
-                    return True
-                else:
-                    logger.warning("[Camera] Basic opened but can't read frames")
-                    self.cap.release()
-                    return False
+                # Skip first few frames to let camera stabilize
+                for _ in range(5):
+                    ret, frame = self.cap.read()
+                    if not ret:
+                        logger.warning("[Camera] Basic opened but can't read frames")
+                        self.cap.release()
+                        return False
+                
+                logger.info("[Camera] Basic OpenCV initialized and ready")
+                return True
             return False
             
         except Exception as e:
