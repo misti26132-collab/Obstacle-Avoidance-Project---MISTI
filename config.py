@@ -6,6 +6,18 @@ CAMERA_WIDTH = 640
 CAMERA_HEIGHT = 480
 CAMERA_FPS = 30
 
+USE_GSTREAMER = True 
+
+GSTREAMER_PIPELINE = (
+    "nvarguscamerasrc sensor-id=0 ! "
+    "video/x-raw(memory:NVMM), width=1920, height=1080, format=NV12, framerate=30/1 ! "
+    "nvvidconv flip-method=0 ! "
+    "video/x-raw, width=640, height=480, format=BGRx ! "
+    "videoconvert ! "
+    "video/x-raw, format=BGR ! "
+    "appsink drop=1"
+)
+
 # Text-to-Speech Configuration
 SPEECH_COOLDOWN = 2.0
 SPEECH_RATE = 175

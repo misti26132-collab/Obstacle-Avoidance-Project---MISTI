@@ -3,7 +3,7 @@ import time
 import numpy as np
 import argparse
 import logging
-import config_demo as config
+import config as config
 import torch
 import gc
 
