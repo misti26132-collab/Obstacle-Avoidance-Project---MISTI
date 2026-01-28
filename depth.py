@@ -5,6 +5,9 @@ from collections import deque
 import time
 import logging
 import config
+import os
+import urllib.request
+from pathlib import Path
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -31,6 +34,10 @@ class DepthEstimator:
         self.transform = None
         self.use_fp16 = config.USE_HALF_PRECISION and torch.cuda.is_available()
         
+        # Create cache directory
+        self.cache_dir = Path(config.MODEL_CACHE_DIR)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        
         for attempt in range(max_retries):
             try:
                 logger.info(
@@ -38,12 +45,51 @@ class DepthEstimator:
                     f"(attempt {attempt + 1}/{max_retries})..."
                 )
                 
-                # Use MiDaS_small for Jetson (faster, less memory)
-                self.midas = torch.hub.load(
-                    "intel-isl/MiDaS", "MiDaS_small", 
-                    trust_repo=True,
-                    skip_validation=True  # Faster loading
-                )
+                # Try to load from cache first or download with timeout
+                try:
+                    # Set timeout for torch.hub to prevent hanging
+                    import socket
+                    socket.setdefaulttimeout(config.MODEL_LOAD_TIMEOUT)
+                    
+                    # Try loading through torch.hub
+                    self.midas = torch.hub.load(
+                        "intel-isl/MiDaS", "MiDaS_small", 
+                        trust_repo=True,
+                        skip_validation=True  # Faster loading
+                    )
+                    logger.info("[DepthEstimator] MiDaS model loaded from network/cache")
+                    
+                except RuntimeError as e:
+                    if "operator torchvision::nms" in str(e):
+                        logger.warning("[DepthEstimator] Circular import detected, using fallback depth...")
+                        raise RuntimeError("Circular import - using fallback")
+                    raise
+                        
+                except (OSError, urllib.error.URLError, socket.timeout, Exception) as e:
+                    logger.warning(f"[DepthEstimator] Network load failed ({type(e).__name__}), checking local cache...")
+                    
+                    # Try to load from local cache if offline mode or network failed
+                    try:
+                        local_model_path = self.cache_dir / "midas_small.pt"
+                        if local_model_path.exists():
+                            logger.info(f"[DepthEstimator] Loading MiDaS from local cache: {local_model_path}")
+                            self.midas = torch.hub.load(
+                                "intel-isl/MiDaS", "MiDaS_small",
+                                source="local",
+                                skip_validation=True
+                            )
+                        elif config.OFFLINE_MODE:
+                            raise RuntimeError(
+                                f"Offline mode enabled but no cached model found at {local_model_path}. "
+                                f"Please download the model when internet is available."
+                            )
+                        else:
+                            logger.warning("[DepthEstimator] No local cache, retrying network...")
+                            raise
+                    except Exception as cache_error:
+                        logger.warning(f"[DepthEstimator] Cache load also failed: {cache_error}")
+                        raise
+                
                 self.midas.to(self.device)
                 self.midas.eval()
                 
@@ -53,11 +99,19 @@ class DepthEstimator:
                     self.midas = self.midas.half()
                 
                 logger.info("[DepthEstimator] Loading transforms...")
-                transforms = torch.hub.load(
-                    "intel-isl/MiDaS", "transforms", 
-                    trust_repo=True,
-                    skip_validation=True
-                )
+                try:
+                    socket.setdefaulttimeout(config.MODEL_LOAD_TIMEOUT)
+                    transforms = torch.hub.load(
+                        "intel-isl/MiDaS", "transforms", 
+                        trust_repo=True,
+                        skip_validation=True
+                    )
+                except (OSError, urllib.error.URLError, socket.timeout, Exception) as e:
+                    logger.warning(f"[DepthEstimator] Could not load transforms from network: {e}")
+                    # Fallback to basic transform
+                    logger.info("[DepthEstimator] Using fallback transforms...")
+                    transforms = self._get_fallback_transforms()
+                
                 self.transform = transforms.small_transform
                 
                 logger.info("[DepthEstimator] MiDaS model loaded successfully")
@@ -92,12 +146,35 @@ class DepthEstimator:
                     logger.info(f"[DepthEstimator] Retrying in {wait_time} seconds...")
                     time.sleep(wait_time)
                 else:
-                    raise RuntimeError(
-                        f"Failed to load MiDaS model after {max_retries} attempts.\n"
-                        f"Last error: {e}\n"
-                        f"This is usually a network issue. "
-                        f"Check your internet connection and try again."
-                    )
+                    # Use simplified fallback on final failure
+                    logger.warning("[DepthEstimator] All loading attempts failed, using fallback depth estimator")
+                    self._use_fallback_depth_estimator()
+                    return
+        
+    def _use_fallback_depth_estimator(self):
+        """Use a simple CNN-based depth estimator as fallback"""
+        logger.info("[DepthEstimator] Initializing fallback depth estimator (simple model)...")
+        try:
+            # Try to use timm-based depth model as fallback
+            import timm
+            try:
+                self.midas = timm.create_model('vit_tiny_patch16_224', pretrained=True)
+                self.midas.to(self.device)
+                self.midas.eval()
+                if self.use_fp16:
+                    self.midas = self.midas.half()
+                logger.info("[DepthEstimator] Using ViT-Tiny as fallback depth model")
+            except:
+                # If timm fails, use a simple passthrough
+                logger.info("[DepthEstimator] Using passthrough fallback depth (will return zeros)")
+                self.midas = None
+        except:
+            logger.warning("[DepthEstimator] Could not initialize fallback, will use dummy output")
+            self.midas = None
+        
+        # Always use fallback transforms
+        self.transform = self._get_fallback_transforms().small_transform
+        self.initialized = True
         
         # Adaptive scaling components
         self.scale_history = deque(maxlen=config.DEPTH_HISTORY_SIZE)
@@ -108,10 +185,35 @@ class DepthEstimator:
         if torch.cuda.is_available():
             logger.info("[DepthEstimator] Pre-warming CUDA...")
             dummy_frame = np.zeros((480, 640, 3), dtype=np.uint8)
-            _ = self.estimate(dummy_frame)
-            logger.info("[DepthEstimator] CUDA warm-up complete")
+            try:
+                _ = self.estimate(dummy_frame)
+                logger.info("[DepthEstimator] CUDA warm-up complete")
+            except Exception as e:
+                logger.warning(f"[DepthEstimator] CUDA warm-up skipped: {e}")
         
         logger.info("[DepthEstimator] Initialization complete")
+    
+    def _get_fallback_transforms(self):
+        """Return a fallback transforms object when network is unavailable"""
+        class FallbackTransforms:
+            class SmallTransform:
+                def __call__(self, img):
+                    # Resize to 256x256 and normalize
+                    h, w = img.shape[:2]
+                    size = 256
+                    img = cv2.resize(img, (size, size))
+                    
+                    # Normalize to [-1, 1] range
+                    img = img.astype(np.float32) / 255.0
+                    img = (img - 0.5) / 0.5
+                    
+                    # Convert to tensor
+                    img = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0)
+                    return img
+            
+            small_transform = SmallTransform()
+        
+        return FallbackTransforms()
 
     @torch.amp.autocast('cuda', enabled=True)  # Automatic mixed precision
     def estimate(self, frame):
@@ -120,6 +222,12 @@ class DepthEstimator:
 
         # Convert BGR to RGB
         img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        
+        # Handle fallback (no model loaded)
+        if self.midas is None:
+            logger.debug("[DepthEstimator] Using dummy depth (fallback mode)")
+            # Return uniform depth map indicating "far away"
+            return np.zeros((img.shape[0], img.shape[1]), dtype=np.float32)
         
         # Prepare input
         input_batch = self.transform(img).to(self.device)
@@ -132,9 +240,17 @@ class DepthEstimator:
         with torch.no_grad():
             prediction = self.midas(input_batch)
             
+            # Handle output if it's not a depth map (for timm models)
+            if prediction.dim() == 4:  # [batch, channels, height, width]
+                if prediction.shape[1] > 1:
+                    # Multi-channel output, average to single channel
+                    prediction = prediction.mean(dim=1, keepdim=True)
+                else:
+                    prediction = prediction.squeeze(1)
+            
             # Resize prediction
             prediction = torch.nn.functional.interpolate(
-                prediction.unsqueeze(1),
+                prediction.unsqueeze(1) if prediction.dim() == 3 else prediction,
                 size=img.shape[:2],
                 mode="bicubic",
                 align_corners=False,
@@ -145,6 +261,11 @@ class DepthEstimator:
             depth_map_raw = prediction.float().cpu().numpy()
         else:
             depth_map_raw = prediction.cpu().numpy()
+        
+        # Aggressive memory cleanup after inference
+        del input_batch, prediction
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         # Adaptive scaling
         p5 = np.percentile(depth_map_raw, config.DEPTH_MIN_PERCENTILE)

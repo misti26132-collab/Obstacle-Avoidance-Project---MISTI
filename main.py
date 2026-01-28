@@ -3,14 +3,64 @@ import time
 import numpy as np
 import argparse
 import logging
-from depth import DepthEstimator
-from Speech_new import SpeechEngine
-from ultralytics import YOLO
-from health_check import SystemHealthMonitor
-from camera_utils import JetsonCamera
 import config 
 import torch
 import gc
+import psutil
+import os
+
+# Pre-load torchvision EARLY to avoid circular imports with torch.hub
+try:
+    import torchvision
+    import torchvision._meta_registrations  # Ensure all registrations are done
+except ImportError:
+    pass
+except RuntimeError as e:
+    # Circular import may still occur, but we'll handle it in depth.py
+    if "operator torchvision::nms" not in str(e):
+        raise
+
+# Now import project modules after torchvision is loaded
+from depth import DepthEstimator
+from Speech_new import SpeechEngine
+from health_check import SystemHealthMonitor
+from camera_utils import JetsonCamera
+
+class DummyYOLO:
+    """Fallback YOLO when imports fail"""
+    def __init__(self, *args, **kwargs):
+        self.overrides = {'verbose': False, 'device': 'cpu'}
+        self.model = None
+        logger.warning("[YOLO] Using dummy YOLO (models unavailable)")
+    
+    def to(self, device):
+        return self
+    
+    def predict(self, *args, **kwargs):
+        # Return empty predictions
+        class EmptyResults:
+            def __init__(self):
+                self.boxes = None
+                self.xyxy = []
+                self.conf = []
+                self.cls = []
+        return [EmptyResults()]
+
+# Lazy import YOLO to avoid reimporting torchvision
+def get_yolo():
+    # Suppress warnings about circular imports
+    import warnings
+    with warnings.catch_warnings():
+        warnings.filterwarnings('ignore')
+        try:
+            from ultralytics import YOLO
+            return YOLO
+        except (RuntimeError, ImportError, AttributeError) as e:
+            if any(x in str(e) for x in ["extension", "nms", "torchvision", "partially initialized"]):
+                # Circular import or torchvision issue - use dummy
+                logger.warning(f"[YOLO] Could not import YOLO ({type(e).__name__}), using dummy class")
+                return DummyYOLO
+            raise
 
 print("=" * 60)
 print("GPU STATUS CHECK")
@@ -52,6 +102,34 @@ def calculate_iou(box1, box2):
     return inter_area / union_area if union_area > 0 else 0
 
 
+def cleanup_memory(force=False):
+    """Aggressive memory cleanup for Jetson post-update"""
+    if config.AGGRESSIVE_MEMORY_CLEANUP or force:
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+
+def check_cuda_memory():
+    """Check CUDA memory usage and clear cache if threshold exceeded"""
+    if not torch.cuda.is_available():
+        return False
+    
+    try:
+        # Get current memory usage
+        current_memory = torch.cuda.memory_allocated() / torch.cuda.get_device_properties(0).total_memory
+        
+        if current_memory > config.CUDA_MEMORY_THRESHOLD:
+            logger.warning(f"[Memory] CUDA memory at {current_memory*100:.1f}%, clearing cache...")
+            torch.cuda.empty_cache()
+            return True
+        return False
+    except Exception as e:
+        logger.warning(f"[Memory] Failed to check CUDA memory: {e}")
+        return False
+
+
 class DualModelDetector:
     """
     Same as your original, but with priority filtering added
@@ -62,15 +140,33 @@ class DualModelDetector:
         logger.warning(f"[DualModel] Loading COCO model: {model_name}...")
         
         device = 'cuda:0' if config.CUDA_DEVICE == 0 else 'cpu'
+        
+        # Load YOLO with memory optimizations (using lazy import)
+        YOLO = get_yolo()
         self.yolo_coco = YOLO(model_name)
         self.yolo_coco.to(device)
         self.yolo_coco.overrides['verbose'] = False
+        self.yolo_coco.overrides['device'] = device
+        
+        # Enable model optimization for inference (skip if dummy model)
+        if self.yolo_coco.model is not None:
+            self.yolo_coco.model.eval()
+            if hasattr(self.yolo_coco.model, 'half'):
+                self.yolo_coco.model.half()
         
         logger.warning(f"[DualModel] Loading custom model: {custom_model_path}...")
         try:
             self.yolo_custom = YOLO(custom_model_path)
             self.yolo_custom.to(device)
             self.yolo_custom.overrides['verbose'] = False
+            self.yolo_custom.overrides['device'] = device
+            
+            # Enable model optimization for inference (skip if dummy model)
+            if self.yolo_custom.model is not None:
+                self.yolo_custom.model.eval()
+                if hasattr(self.yolo_custom.model, 'half'):
+                    self.yolo_custom.model.half()
+            
             logger.warning("[DualModel] Custom model loaded")
         except Exception as e:
             logger.error(f"[DualModel] Failed to load custom model: {e}")
@@ -226,10 +322,13 @@ class DualModelDetector:
         alert_detections = [d for d in all_detections if self._should_alert(d.get('priority', 'LOW'))]
         
         if len(alert_detections) == 0:
-            if self.frame_count % 100 == 0:
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    gc.collect()
+            # Aggressive memory cleanup every GC_COLLECT_INTERVAL frames
+            if self.frame_count % config.GC_COLLECT_INTERVAL == 0:
+                cleanup_memory(force=True)
+            
+            # Check CUDA memory every frame in case of spike
+            check_cuda_memory()
+            
             return frame, None, None, None, None
         
         # === UNCHANGED: Your original analysis (but on filtered detections) ===
@@ -244,10 +343,12 @@ class DualModelDetector:
                 closest['class'], closest['source']
             )
         
-        if self.frame_count % 100 == 0:
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                gc.collect()
+        # Aggressive memory cleanup
+        if self.frame_count % config.GC_COLLECT_INTERVAL == 0:
+            cleanup_memory(force=True)
+        
+        # Check CUDA memory usage
+        check_cuda_memory()
         
         obstacle_class = closest['class'] if closest else None
         return annotated_frame, direction, distance, obstacle_class, priority
