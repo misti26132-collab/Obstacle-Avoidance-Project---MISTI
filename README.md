@@ -34,12 +34,4 @@ Speech.py            # Audio feedback
 config.py            # Configuration
 requirements.txt
 
-**Installation**
-
-git clone https://github.com/hanawahban/obstacle_detector
- cd obstacle_detector
-pip install -r requirements.txt
-Running the Project
-python main.py
-
 The program will start the camera feed, detect nearby obstacles, estimate their distance, and provide audio feedback.
