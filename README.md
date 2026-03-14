@@ -37,7 +37,7 @@ requirements.txt
 **Installation**
 
 git clone https://github.com/hanawahban/obstacle_detector
-cd obstacle_detector
+ cd obstacle_detector
 pip install -r requirements.txt
 Running the Project
 python main.py
