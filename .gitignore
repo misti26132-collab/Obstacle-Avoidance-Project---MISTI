@@ -55,7 +55,6 @@ cuda.sh
 demo.sh
 fix.sh
 performance.py
-requirements.txt
 opencv
 install_cusparself.sh
 index.html
