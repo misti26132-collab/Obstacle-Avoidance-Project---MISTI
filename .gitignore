@@ -11,8 +11,6 @@ __pycache__/
 dist/
 build/
 
-venv
-
 tensorrt/
 tmp_cusparself/
 torchvision/
