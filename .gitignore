@@ -11,8 +11,7 @@ __pycache__/
 dist/
 build/
 
-.env
-.env.local
+venv
 
 tensorrt/
 tmp_cusparself/
