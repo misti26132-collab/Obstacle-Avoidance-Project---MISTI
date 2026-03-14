@@ -25,13 +25,5 @@ YOLOv8
 MiDaS
 NVIDIA Jetson
 
-**Project Structure**
-
-main.py              # Main detection pipeline
-camera_utils.py      # Camera input handling
-depth.py             # Depth estimation
-Speech.py            # Audio feedback
-config.py            # Configuration
-requirements.txt
 
 The program will start the camera feed, detect nearby obstacles, estimate their distance, and provide audio feedback.
