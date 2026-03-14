@@ -48,3 +48,12 @@ tmp_cusparselt/
 opencv-*/
 .ipynb_checkpoints/
 *.ipynb
+
+TestCam.py
+TestTTS.py
+
+cuda.sh
+demo.sh
+fix.sh
+performance.py
+requirements.txt
