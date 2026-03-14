@@ -44,3 +44,7 @@ torch/hub/
 .cache/
 
 tmp_cusparselt/
+/tmp/
+opencv-*/
+.ipynb_checkpoints/
+*.ipynb
