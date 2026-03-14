@@ -26,6 +26,7 @@ MiDaS
 NVIDIA Jetson
 
 **Project Structure**
+
 main.py              # Main detection pipeline
 camera_utils.py      # Camera input handling
 depth.py             # Depth estimation
@@ -34,6 +35,7 @@ config.py            # Configuration
 requirements.txt
 
 **Installation**
+
 git clone https://github.com/hanawahban/obstacle_detector
 cd obstacle_detector
 pip install -r requirements.txt
